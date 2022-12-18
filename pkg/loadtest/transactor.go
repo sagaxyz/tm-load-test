@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -41,6 +43,9 @@ type Transactor struct {
 	txCount   int       // How many transactions have been sent.
 	txBytes   int64     // How many transaction bytes have been sent, cumulatively.
 	txRate    float64   // The number of transactions sent, per second.
+
+	descL []*loadDesc
+	stats *ProcessedStats
 
 	progressCallbackMtx      sync.RWMutex
 	progressCallbackID       int                                      // A unique identifier for this transactor when calling the progress callback.
@@ -87,6 +92,7 @@ func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
 		conn:                     conn,
 		broadcastTxMethod:        "broadcast_tx_" + config.BroadcastTxMethod,
 		progressCallbackInterval: defaultProgressCallbackInterval,
+		descL:                    make([]*loadDesc, 0, 100),
 	}, nil
 }
 
@@ -162,6 +168,105 @@ func (t *Transactor) receiveLoop() {
 	}
 }
 
+func (t *Transactor) processStats() {
+	defer func() {
+		t.descL = t.descL[:0]
+	}()
+
+	// 1. Sort the values by .Latency
+	sort.Slice(t.descL, func(i, j int) bool {
+		di, dj := t.descL[i], t.descL[j]
+		return di.Latency < dj.Latency
+	})
+
+	// Values are sorted by latency, but still bucketize them by the second of occurrence.
+	buckets := make(map[int][]*loadDesc, len(t.descL))
+
+	startTime := t.startTime
+	var maxTimeDur time.Duration = -10
+	for _, ds := range t.descL {
+		timeDiff := ds.At.Sub(startTime)
+		if timeDiff > maxTimeDur {
+			maxTimeDur = timeDiff
+		}
+		indexBySecond := int(math.Floor(timeDiff.Seconds()))
+		buckets[indexBySecond] = append(buckets[indexBySecond], ds)
+	}
+
+	var totalTxs uint64
+	bucketized := make([]*bucketizedBySecond, 0, len(buckets))
+	totalBytes := uint64(0)
+	for sec := 0; sec < len(buckets); sec++ {
+		values := buckets[sec]
+		bytesPerSecond := int(0)
+		totalTxs += uint64(len(values))
+		for _, di := range values {
+			bytesPerSecond += di.Size
+		}
+		totalBytes += uint64(bytesPerSecond)
+		bucketized = append(bucketized, &bucketizedBySecond{
+			Sec:   sec,
+			QPS:   len(values),
+			Bytes: bytesPerSecond,
+		})
+	}
+
+	t.stats = &ProcessedStats{
+		AvgBytesPerSecond: float64(totalBytes) / maxTimeDur.Seconds(),
+		AvgTxPerSecond:    float64(totalTxs) / maxTimeDur.Seconds(),
+		PerSecond:         bucketized,
+		TotalBytes:        totalBytes,
+		TotalTxs:          totalTxs,
+
+		TotalTime: maxTimeDur,
+
+		P50thLatency: t.pNthByTimeByTime(t.descL, 50),
+		P75thLatency: t.pNthByTimeByTime(t.descL, 75),
+		P90thLatency: t.pNthByTimeByTime(t.descL, 90),
+		P95thLatency: t.pNthByTimeByTime(t.descL, 95),
+		P99thLatency: t.pNthByTimeByTime(t.descL, 99),
+	}
+}
+
+type latencyPercentile struct {
+	AtNs    int64         `json:"at_ns"`
+	AtStr   string        `json:"at_str"`
+	Latency time.Duration `json:"latency"`
+}
+
+type bucketizedBySecond struct {
+	Sec   int `json:"sec"`
+	QPS   int `json:"qps"`
+	Bytes int `json:"bytes"`
+}
+
+type ProcessedStats struct {
+	AvgBytesPerSecond float64       `json:"avg_bytes_per_sec"`
+	AvgTxPerSecond    float64       `json:"avg_tx_per_sec"`
+	TotalTime         time.Duration `json:"total_time"`
+	TotalBytes        uint64        `json:"total_bytes"`
+	TotalTxs          uint64        `json:"total_txs"`
+
+	P50thLatency *latencyPercentile `json:"p50"`
+	P75thLatency *latencyPercentile `json:"p75"`
+	P90thLatency *latencyPercentile `json:"p90"`
+	P95thLatency *latencyPercentile `json:"p95"`
+	P99thLatency *latencyPercentile `json:"p99"`
+
+	PerSecond []*bucketizedBySecond `json:"per_sec"`
+}
+
+func (t *Transactor) pNthByTimeByTime(descL []*loadDesc, nth int) *latencyPercentile {
+	i := int(float64(nth*len(descL)) / 100.0)
+	di := descL[i]
+	at := di.At.Sub(t.startTime)
+	return &latencyPercentile{
+		AtNs:    at.Nanoseconds(),
+		AtStr:   at.String(),
+		Latency: di.Latency,
+	}
+}
+
 func (t *Transactor) sendLoop() {
 	defer t.wg.Done()
 	t.conn.SetPingHandler(func(message string) error {
@@ -182,6 +287,8 @@ func (t *Transactor) sendLoop() {
 		sendTicker.Stop()
 		progressTicker.Stop()
 	}()
+
+	defer t.processStats()
 
 	for {
 		if t.config.Count > 0 && t.GetTxCount() >= t.config.Count {
@@ -245,6 +352,12 @@ func (t *Transactor) setStop(err error) {
 	t.stopMtx.Unlock()
 }
 
+type loadDesc struct {
+	At      time.Time
+	Size    int
+	Latency time.Duration
+}
+
 func (t *Transactor) sendTransactions() error {
 	// send as many transactions as we can, up to the send rate
 	totalSent := t.GetTxCount()
@@ -256,6 +369,7 @@ func (t *Transactor) sendTransactions() error {
 	if totalSent == 0 {
 		t.trackStartTime()
 	}
+
 	var sent int
 	var sentBytes int64
 	defer func() { t.trackSentTxs(sent, sentBytes) }()
@@ -266,9 +380,12 @@ func (t *Transactor) sendTransactions() error {
 		if err != nil {
 			return err
 		}
+
+		t0 := time.Now()
 		if err := t.writeTx(tx); err != nil {
 			return err
 		}
+		t.descL = append(t.descL, &loadDesc{At: time.Now(), Size: len(tx), Latency: time.Since(t0)})
 		sentBytes += int64(len(tx))
 		// if we have to make way for the next batch
 		if time.Since(batchStartTime) >= time.Duration(t.config.SendPeriod)*time.Second {
