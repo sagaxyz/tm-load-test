@@ -191,13 +191,43 @@ func (t *Transactor) processStats() {
 		}
 		indexBySecond := int(math.Floor(timeDiff.Seconds()))
 		buckets[indexBySecond] = append(buckets[indexBySecond], ds)
+
 	}
+
+	// For each second, bucket values for latency and bytes processed.
 
 	var totalTxs uint64
 	bucketized := make([]*bucketizedBySecond, 0, len(buckets))
 	totalBytes := uint64(0)
 	for sec := 0; sec < len(buckets); sec++ {
 		values := buckets[sec]
+
+		// 1. Rank by latency.
+		sort.Slice(values, func(i, j int) bool {
+			vi, vj := values[i], values[j]
+			return vi.Latency < vj.Latency
+		})
+		latencyRankings := &ProcessedStats{
+			P50thLatency: t.pNthForLatency(values, 50),
+			P75thLatency: t.pNthForLatency(values, 75),
+			P90thLatency: t.pNthForLatency(values, 90),
+			P95thLatency: t.pNthForLatency(values, 95),
+			P99thLatency: t.pNthForLatency(values, 99),
+		}
+
+		// 2. Rank by bytes.
+		sort.Slice(values, func(i, j int) bool {
+			vi, vj := values[i], values[j]
+			return vi.Size < vj.Size
+		})
+		bytesRankings := &ProcessedStats{
+			P50thLatency: t.pNthForBytes(values, 50),
+			P75thLatency: t.pNthForBytes(values, 75),
+			P90thLatency: t.pNthForBytes(values, 90),
+			P95thLatency: t.pNthForBytes(values, 95),
+			P99thLatency: t.pNthForBytes(values, 99),
+		}
+
 		bytesPerSecond := int(0)
 		totalTxs += uint64(len(values))
 		for _, di := range values {
@@ -208,62 +238,102 @@ func (t *Transactor) processStats() {
 			Sec:   sec,
 			QPS:   len(values),
 			Bytes: bytesPerSecond,
+
+			LatencyRankings: latencyRankings,
+			BytesRankings:   bytesRankings,
 		})
 	}
+
+	raw := make([]*loadDesc, len(t.descL))
+	copy(raw, t.descL)
+	raw = nil
 
 	t.stats = &ProcessedStats{
 		AvgBytesPerSecond: float64(totalBytes) / maxTimeDur.Seconds(),
 		AvgTxPerSecond:    float64(totalTxs) / maxTimeDur.Seconds(),
-		PerSecond:         bucketized,
-		TotalBytes:        totalBytes,
-		TotalTxs:          totalTxs,
 
-		TotalTime: maxTimeDur,
+		PerSecond:  bucketized,
+		TotalBytes: totalBytes,
+		TotalTxs:   totalTxs,
+		TotalTime:  maxTimeDur,
+		StartTime:  &startTime,
 
-		P50thLatency: t.pNthByTimeByTime(t.descL, 50),
-		P75thLatency: t.pNthByTimeByTime(t.descL, 75),
-		P90thLatency: t.pNthByTimeByTime(t.descL, 90),
-		P95thLatency: t.pNthByTimeByTime(t.descL, 95),
-		P99thLatency: t.pNthByTimeByTime(t.descL, 99),
+		P50thLatency: t.pNth(t.descL, 50),
+		P75thLatency: t.pNth(t.descL, 75),
+		P90thLatency: t.pNth(t.descL, 90),
+		P95thLatency: t.pNth(t.descL, 95),
+		P99thLatency: t.pNth(t.descL, 99),
+
+		Raw: raw,
 	}
 }
 
-type latencyPercentile struct {
-	AtNs    int64         `json:"at_ns"`
-	AtStr   string        `json:"at_str"`
-	Latency time.Duration `json:"latency"`
+type descPercentile struct {
+	AtNs    int64         `json:"at_ns,omitempty"`
+	AtStr   string        `json:"at_str,omitempty"`
+	Latency time.Duration `json:"latency,omitempty"`
+	Size    int           `json:"size,omitempty"`
 }
 
 type bucketizedBySecond struct {
 	Sec   int `json:"sec"`
-	QPS   int `json:"qps"`
-	Bytes int `json:"bytes"`
+	QPS   int `json:"qps,omitempty"`
+	Bytes int `json:"bytes,omitempty"`
+
+	BytesRankings   *ProcessedStats `json:"bytes_rankings,omitempty"`
+	LatencyRankings *ProcessedStats `json:"latency_rankings,omitempty"`
 }
 
 type ProcessedStats struct {
-	AvgBytesPerSecond float64       `json:"avg_bytes_per_sec"`
-	AvgTxPerSecond    float64       `json:"avg_tx_per_sec"`
-	TotalTime         time.Duration `json:"total_time"`
-	TotalBytes        uint64        `json:"total_bytes"`
-	TotalTxs          uint64        `json:"total_txs"`
+	AvgBytesPerSecond float64       `json:"avg_bytes_per_sec,omitempty"`
+	AvgTxPerSecond    float64       `json:"avg_tx_per_sec,omitempty"`
+	TotalTime         time.Duration `json:"total_time,omitempty"`
+	TotalBytes        uint64        `json:"total_bytes,omitempty"`
+	TotalTxs          uint64        `json:"total_txs,omitempty"`
 
-	P50thLatency *latencyPercentile `json:"p50"`
-	P75thLatency *latencyPercentile `json:"p75"`
-	P90thLatency *latencyPercentile `json:"p90"`
-	P95thLatency *latencyPercentile `json:"p95"`
-	P99thLatency *latencyPercentile `json:"p99"`
+	P50thLatency *descPercentile `json:"p50,omitempty"`
+	P75thLatency *descPercentile `json:"p75,omitempty"`
+	P90thLatency *descPercentile `json:"p90,omitempty"`
+	P95thLatency *descPercentile `json:"p95,omitempty"`
+	P99thLatency *descPercentile `json:"p99,omitempty"`
 
-	PerSecond []*bucketizedBySecond `json:"per_sec"`
+	PerSecond []*bucketizedBySecond `json:"per_sec,omitempty"`
+
+	StartTime *time.Time  `json:"start_time,omitempty"`
+	Raw       []*loadDesc `json:"-"`
+
+	Rankings []*ProcessedStats `json:"rankings,omitempty"`
 }
 
-func (t *Transactor) pNthByTimeByTime(descL []*loadDesc, nth int) *latencyPercentile {
+func (t *Transactor) pNthForBytes(descL []*loadDesc, nth int) *descPercentile {
+	dp := t.pNth(descL, nth)
+	if dp != nil {
+		dp.Latency = 0
+	}
+	return dp
+}
+
+func (t *Transactor) pNthForLatency(descL []*loadDesc, nth int) *descPercentile {
+	dp := t.pNth(descL, nth)
+	if dp != nil {
+		dp.Size = 0
+	}
+	return dp
+}
+
+func (t *Transactor) pNth(descL []*loadDesc, nth int) *descPercentile {
+	if len(descL) == 0 {
+		return nil
+	}
+
 	i := int(float64(nth*len(descL)) / 100.0)
 	di := descL[i]
 	at := di.At.Sub(t.startTime)
-	return &latencyPercentile{
+	return &descPercentile{
 		AtNs:    at.Nanoseconds(),
 		AtStr:   at.String(),
 		Latency: di.Latency,
+		Size:    di.Size,
 	}
 }
 
@@ -381,11 +451,11 @@ func (t *Transactor) sendTransactions() error {
 			return err
 		}
 
-		t0 := time.Now()
+		tStart := time.Now()
 		if err := t.writeTx(tx); err != nil {
 			return err
 		}
-		t.descL = append(t.descL, &loadDesc{At: time.Now(), Size: len(tx), Latency: time.Since(t0)})
+		t.descL = append(t.descL, &loadDesc{At: tStart, Size: len(tx), Latency: time.Since(tStart)})
 		sentBytes += int64(len(tx))
 		// if we have to make way for the next batch
 		if time.Since(batchStartTime) >= time.Duration(t.config.SendPeriod)*time.Second {
