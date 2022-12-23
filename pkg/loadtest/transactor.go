@@ -197,7 +197,7 @@ func (t *Transactor) processStats() {
 	// For each second, bucket values for latency and bytes processed.
 
 	var totalTxs uint64
-	bucketized := make([]*bucketizedBySecond, 0, len(buckets))
+	bucketized := make([]*BucketizedBySecond, 0, len(buckets))
 	totalBytes := uint64(0)
 	for sec := 0; sec < len(buckets); sec++ {
 		values := buckets[sec]
@@ -234,7 +234,7 @@ func (t *Transactor) processStats() {
 			bytesPerSecond += di.Size
 		}
 		totalBytes += uint64(bytesPerSecond)
-		bucketized = append(bucketized, &bucketizedBySecond{
+		bucketized = append(bucketized, &BucketizedBySecond{
 			Sec:   sec,
 			QPS:   len(values),
 			Bytes: bytesPerSecond,
@@ -268,14 +268,14 @@ func (t *Transactor) processStats() {
 	}
 }
 
-type descPercentile struct {
+type DescPercentile struct {
 	AtNs    int64         `json:"at_ns,omitempty"`
 	AtStr   string        `json:"at_str,omitempty"`
 	Latency time.Duration `json:"latency,omitempty"`
 	Size    int           `json:"size,omitempty"`
 }
 
-type bucketizedBySecond struct {
+type BucketizedBySecond struct {
 	Sec   int `json:"sec"`
 	QPS   int `json:"qps,omitempty"`
 	Bytes int `json:"bytes,omitempty"`
@@ -291,13 +291,13 @@ type ProcessedStats struct {
 	TotalBytes        uint64        `json:"total_bytes,omitempty"`
 	TotalTxs          uint64        `json:"total_txs,omitempty"`
 
-	P50thLatency *descPercentile `json:"p50,omitempty"`
-	P75thLatency *descPercentile `json:"p75,omitempty"`
-	P90thLatency *descPercentile `json:"p90,omitempty"`
-	P95thLatency *descPercentile `json:"p95,omitempty"`
-	P99thLatency *descPercentile `json:"p99,omitempty"`
+	P50thLatency *DescPercentile `json:"p50,omitempty"`
+	P75thLatency *DescPercentile `json:"p75,omitempty"`
+	P90thLatency *DescPercentile `json:"p90,omitempty"`
+	P95thLatency *DescPercentile `json:"p95,omitempty"`
+	P99thLatency *DescPercentile `json:"p99,omitempty"`
 
-	PerSecond []*bucketizedBySecond `json:"per_sec,omitempty"`
+	PerSecond []*BucketizedBySecond `json:"per_sec,omitempty"`
 
 	StartTime *time.Time  `json:"start_time,omitempty"`
 	Raw       []*loadDesc `json:"-"`
@@ -305,7 +305,7 @@ type ProcessedStats struct {
 	Rankings []*ProcessedStats `json:"rankings,omitempty"`
 }
 
-func (t *Transactor) pNthForBytes(descL []*loadDesc, nth int) *descPercentile {
+func (t *Transactor) pNthForBytes(descL []*loadDesc, nth int) *DescPercentile {
 	dp := t.pNth(descL, nth)
 	if dp != nil {
 		dp.Latency = 0
@@ -313,7 +313,7 @@ func (t *Transactor) pNthForBytes(descL []*loadDesc, nth int) *descPercentile {
 	return dp
 }
 
-func (t *Transactor) pNthForLatency(descL []*loadDesc, nth int) *descPercentile {
+func (t *Transactor) pNthForLatency(descL []*loadDesc, nth int) *DescPercentile {
 	dp := t.pNth(descL, nth)
 	if dp != nil {
 		dp.Size = 0
@@ -321,7 +321,7 @@ func (t *Transactor) pNthForLatency(descL []*loadDesc, nth int) *descPercentile 
 	return dp
 }
 
-func (t *Transactor) pNth(descL []*loadDesc, nth int) *descPercentile {
+func (t *Transactor) pNth(descL []*loadDesc, nth int) *DescPercentile {
 	if len(descL) == 0 {
 		return nil
 	}
@@ -329,7 +329,7 @@ func (t *Transactor) pNth(descL []*loadDesc, nth int) *descPercentile {
 	i := int(float64(nth*len(descL)) / 100.0)
 	di := descL[i]
 	at := di.At.Sub(t.startTime)
-	return &descPercentile{
+	return &DescPercentile{
 		AtNs:    at.Nanoseconds(),
 		AtStr:   at.String(),
 		Latency: di.Latency,
