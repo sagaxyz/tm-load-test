@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/informalsystems/tm-load-test/pkg/loadtest"
+	"github.com/sagaxyz/tm-load-test/pkg/loadtest"
 )
 
 const appLongDesc = `Load testing application for Tendermint with optional coordinator/worker mode.

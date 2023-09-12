@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/informalsystems/tm-load-test/internal/logging"
+	"github.com/sagaxyz/tm-load-test/internal/logging"
 )
 
 // TransactorGroup allows us to encapsulate the management of a group of

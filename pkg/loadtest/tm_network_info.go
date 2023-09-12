@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/informalsystems/tm-load-test/internal/logging"
+	"github.com/sagaxyz/tm-load-test/internal/logging"
 )
 
 // peerInfo is returned when polling the Tendermint RPC endpoint.

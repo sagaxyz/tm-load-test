@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/informalsystems/tm-load-test/pkg/loadtest"
+	"github.com/sagaxyz/tm-load-test/pkg/loadtest"
 )
 
 const (

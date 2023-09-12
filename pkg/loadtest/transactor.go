@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/informalsystems/tm-load-test/internal/logging"
+	"github.com/sagaxyz/tm-load-test/internal/logging"
 )
 
 const (
