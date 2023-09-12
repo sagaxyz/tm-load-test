@@ -43,6 +43,15 @@ func (g *TransactorGroup) SetLogger(logger logging.Logger) {
 	g.logger = logger
 }
 
+func (g *TransactorGroup) processedStats() (psL []*ProcessedStats) {
+	for _, t := range g.transactors {
+		if t.stats != nil {
+			psL = append(psL, t.stats)
+		}
+	}
+	return psL
+}
+
 // Add will instantiate a new Transactor with the given parameters. If
 // instantiation fails it'll automatically shut down and close all other
 // transactors, returning the error.

@@ -8,6 +8,12 @@ import (
 
 // ExecuteStandalone will run a standalone (non-coordinator/worker) load test.
 func ExecuteStandalone(cfg Config) error {
+	_, err := ExecuteStandaloneWithStats(cfg)
+	return err
+}
+
+func ExecuteStandaloneWithStats(cfg Config) ([]*ProcessedStats, error) {
+
 	logger := logging.NewLogrusLogger("loadtest")
 
 	logger.Debug("Attempting standalone load test against endpoints", "endpoints", cfg.Endpoints)
@@ -25,7 +31,7 @@ func ExecuteStandalone(cfg Config) error {
 		)
 		if err != nil {
 			logger.Error("Failed while waiting for peers to connect", "err", err)
-			return err
+			return nil, err
 		}
 		cfg.Endpoints = peers
 		logger.Debug("Updated list of endpoints for test", "endpoints", cfg.Endpoints)
@@ -35,7 +41,7 @@ func ExecuteStandalone(cfg Config) error {
 	tg := NewTransactorGroup()
 	tg.SetLogger(logger)
 	if err := tg.AddAll(&cfg); err != nil {
-		return err
+		return nil, err
 	}
 	logger.Info("Initiating load test")
 	tg.Start()
@@ -51,7 +57,7 @@ func ExecuteStandalone(cfg Config) error {
 
 	if err := tg.Wait(); err != nil {
 		logger.Error("Failed to execute load test", "err", err)
-		return err
+		return nil, err
 	}
 
 	// if we need to write the final statistics
@@ -59,10 +65,10 @@ func ExecuteStandalone(cfg Config) error {
 		logger.Info("Writing aggregate statistics", "outputFile", cfg.StatsOutputFile)
 		if err := tg.WriteAggregateStats(cfg.StatsOutputFile); err != nil {
 			logger.Error("Failed to write aggregate statistics", "err", err)
-			return err
+			return nil, err
 		}
 	}
 
 	logger.Info("Load test complete!")
-	return nil
+	return tg.processedStats(), nil
 }

@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -40,6 +42,9 @@ type Transactor struct {
 	txCount   int       // How many transactions have been sent.
 	txBytes   int64     // How many transaction bytes have been sent, cumulatively.
 	txRate    float64   // The number of transactions sent, per second.
+
+	descL []*loadDesc
+	stats *ProcessedStats
 
 	progressCallbackMtx      sync.RWMutex
 	progressCallbackID       int                                      // A unique identifier for this transactor when calling the progress callback.
@@ -86,6 +91,7 @@ func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
 		conn:                     conn,
 		broadcastTxMethod:        "broadcast_tx_" + config.BroadcastTxMethod,
 		progressCallbackInterval: defaultProgressCallbackInterval,
+		descL:                    make([]*loadDesc, 0, 100),
 	}, nil
 }
 
@@ -161,6 +167,175 @@ func (t *Transactor) receiveLoop() {
 	}
 }
 
+func (t *Transactor) processStats() {
+	defer func() {
+		t.descL = t.descL[:0]
+	}()
+
+	// 1. Sort the values by .Latency
+	sort.Slice(t.descL, func(i, j int) bool {
+		di, dj := t.descL[i], t.descL[j]
+		return di.Latency < dj.Latency
+	})
+
+	// Values are sorted by latency, but still bucketize them by the second of occurrence.
+	buckets := make(map[int][]*loadDesc, len(t.descL))
+
+	startTime := t.startTime
+	var maxTimeDur time.Duration = -10
+	for _, ds := range t.descL {
+		timeDiff := ds.At.Sub(startTime)
+		if timeDiff > maxTimeDur {
+			maxTimeDur = timeDiff
+		}
+		indexBySecond := int(math.Floor(timeDiff.Seconds()))
+		buckets[indexBySecond] = append(buckets[indexBySecond], ds)
+
+	}
+
+	// For each second, bucket values for latency and bytes processed.
+
+	var totalTxs uint64
+	bucketized := make([]*BucketizedBySecond, 0, len(buckets))
+	totalBytes := uint64(0)
+	for sec := 0; sec < len(buckets); sec++ {
+		values := buckets[sec]
+
+		// 1. Rank by latency.
+		sort.Slice(values, func(i, j int) bool {
+			vi, vj := values[i], values[j]
+			return vi.Latency < vj.Latency
+		})
+		latencyRankings := &ProcessedStats{
+			P50thLatency: t.pNthForLatency(values, 50),
+			P75thLatency: t.pNthForLatency(values, 75),
+			P90thLatency: t.pNthForLatency(values, 90),
+			P95thLatency: t.pNthForLatency(values, 95),
+			P99thLatency: t.pNthForLatency(values, 99),
+		}
+
+		// 2. Rank by bytes.
+		sort.Slice(values, func(i, j int) bool {
+			vi, vj := values[i], values[j]
+			return vi.Size < vj.Size
+		})
+		bytesRankings := &ProcessedStats{
+			P50thLatency: t.pNthForBytes(values, 50),
+			P75thLatency: t.pNthForBytes(values, 75),
+			P90thLatency: t.pNthForBytes(values, 90),
+			P95thLatency: t.pNthForBytes(values, 95),
+			P99thLatency: t.pNthForBytes(values, 99),
+		}
+
+		bytesPerSecond := int(0)
+		totalTxs += uint64(len(values))
+		for _, di := range values {
+			bytesPerSecond += di.Size
+		}
+		totalBytes += uint64(bytesPerSecond)
+		bucketized = append(bucketized, &BucketizedBySecond{
+			Sec:   sec,
+			QPS:   len(values),
+			Bytes: bytesPerSecond,
+
+			LatencyRankings: latencyRankings,
+			BytesRankings:   bytesRankings,
+		})
+	}
+
+	raw := make([]*loadDesc, len(t.descL))
+	copy(raw, t.descL)
+	raw = nil
+
+	t.stats = &ProcessedStats{
+		AvgBytesPerSecond: float64(totalBytes) / maxTimeDur.Seconds(),
+		AvgTxPerSecond:    float64(totalTxs) / maxTimeDur.Seconds(),
+
+		PerSecond:  bucketized,
+		TotalBytes: totalBytes,
+		TotalTxs:   totalTxs,
+		TotalTime:  maxTimeDur,
+		StartTime:  &startTime,
+
+		P50thLatency: t.pNth(t.descL, 50),
+		P75thLatency: t.pNth(t.descL, 75),
+		P90thLatency: t.pNth(t.descL, 90),
+		P95thLatency: t.pNth(t.descL, 95),
+		P99thLatency: t.pNth(t.descL, 99),
+
+		Raw: raw,
+	}
+}
+
+type DescPercentile struct {
+	AtNs    int64         `json:"at_ns,omitempty"`
+	AtStr   string        `json:"at_str,omitempty"`
+	Latency time.Duration `json:"latency,omitempty"`
+	Size    int           `json:"size,omitempty"`
+}
+
+type BucketizedBySecond struct {
+	Sec   int `json:"sec"`
+	QPS   int `json:"qps,omitempty"`
+	Bytes int `json:"bytes,omitempty"`
+
+	BytesRankings   *ProcessedStats `json:"bytes_rankings,omitempty"`
+	LatencyRankings *ProcessedStats `json:"latency_rankings,omitempty"`
+}
+
+type ProcessedStats struct {
+	AvgBytesPerSecond float64       `json:"avg_bytes_per_sec,omitempty"`
+	AvgTxPerSecond    float64       `json:"avg_tx_per_sec,omitempty"`
+	TotalTime         time.Duration `json:"total_time,omitempty"`
+	TotalBytes        uint64        `json:"total_bytes,omitempty"`
+	TotalTxs          uint64        `json:"total_txs,omitempty"`
+
+	P50thLatency *DescPercentile `json:"p50,omitempty"`
+	P75thLatency *DescPercentile `json:"p75,omitempty"`
+	P90thLatency *DescPercentile `json:"p90,omitempty"`
+	P95thLatency *DescPercentile `json:"p95,omitempty"`
+	P99thLatency *DescPercentile `json:"p99,omitempty"`
+
+	PerSecond []*BucketizedBySecond `json:"per_sec,omitempty"`
+
+	StartTime *time.Time  `json:"start_time,omitempty"`
+	Raw       []*loadDesc `json:"-"`
+
+	Rankings []*ProcessedStats `json:"rankings,omitempty"`
+}
+
+func (t *Transactor) pNthForBytes(descL []*loadDesc, nth int) *DescPercentile {
+	dp := t.pNth(descL, nth)
+	if dp != nil {
+		dp.Latency = 0
+	}
+	return dp
+}
+
+func (t *Transactor) pNthForLatency(descL []*loadDesc, nth int) *DescPercentile {
+	dp := t.pNth(descL, nth)
+	if dp != nil {
+		dp.Size = 0
+	}
+	return dp
+}
+
+func (t *Transactor) pNth(descL []*loadDesc, nth int) *DescPercentile {
+	if len(descL) == 0 {
+		return nil
+	}
+
+	i := int(float64(nth*len(descL)) / 100.0)
+	di := descL[i]
+	at := di.At.Sub(t.startTime)
+	return &DescPercentile{
+		AtNs:    at.Nanoseconds(),
+		AtStr:   at.String(),
+		Latency: di.Latency,
+		Size:    di.Size,
+	}
+}
+
 func (t *Transactor) sendLoop() {
 	defer t.wg.Done()
 	t.conn.SetPingHandler(func(message string) error {
@@ -181,6 +356,8 @@ func (t *Transactor) sendLoop() {
 		sendTicker.Stop()
 		progressTicker.Stop()
 	}()
+
+	defer t.processStats()
 
 	for {
 		if t.config.Count > 0 && t.GetTxCount() >= t.config.Count {
@@ -244,6 +421,12 @@ func (t *Transactor) setStop(err error) {
 	t.stopMtx.Unlock()
 }
 
+type loadDesc struct {
+	At      time.Time
+	Size    int
+	Latency time.Duration
+}
+
 func (t *Transactor) sendTransactions() error {
 	// send as many transactions as we can, up to the send rate
 	totalSent := t.GetTxCount()
@@ -255,6 +438,7 @@ func (t *Transactor) sendTransactions() error {
 	if totalSent == 0 {
 		t.trackStartTime()
 	}
+
 	var sent int
 	var sentBytes int64
 	defer func() { t.trackSentTxs(sent, sentBytes) }()
@@ -265,9 +449,12 @@ func (t *Transactor) sendTransactions() error {
 		if err != nil {
 			return err
 		}
+
+		tStart := time.Now()
 		if err := t.writeTx(tx); err != nil {
 			return err
 		}
+		t.descL = append(t.descL, &loadDesc{At: tStart, Size: len(tx), Latency: time.Since(tStart)})
 		sentBytes += int64(len(tx))
 		// if we have to make way for the next batch
 		if time.Since(batchStartTime) >= time.Duration(t.config.SendPeriod)*time.Second {
