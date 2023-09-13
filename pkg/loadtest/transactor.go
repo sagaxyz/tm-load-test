@@ -1,8 +1,7 @@
 package loadtest
 
 import (
-	"encoding/base64"
-	"encoding/json"
+	"context"
 	"fmt"
 	"math"
 	"net/url"
@@ -12,6 +11,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sagaxyz/tm-load-test/internal/logging"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 )
 
 const (
@@ -33,6 +36,7 @@ type Transactor struct {
 	client            Client
 	logger            logging.Logger
 	conn              *websocket.Conn
+	grpcConn          *grpc.ClientConn
 	broadcastTxMethod string
 	wg                sync.WaitGroup
 
@@ -81,6 +85,10 @@ func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", remoteAddr, resp.Status, resp.StatusCode)
 	}
+	grpcConn, err := grpc.Dial("ec2-35-157-86-64.eu-central-1.compute.amazonaws.com:9090", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
 	logger := logging.NewLogrusLogger(fmt.Sprintf("transactor[%s]", u.String()))
 	logger.Info("Connected to remote Tendermint WebSockets RPC")
 	return &Transactor{
@@ -89,6 +97,7 @@ func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
 		client:                   client,
 		logger:                   logger,
 		conn:                     conn,
+		grpcConn:                 grpcConn,
 		broadcastTxMethod:        "broadcast_tx_" + config.BroadcastTxMethod,
 		progressCallbackInterval: defaultProgressCallbackInterval,
 		descL:                    make([]*loadDesc, 0, 100),
@@ -392,18 +401,39 @@ func (t *Transactor) sendLoop() {
 }
 
 func (t *Transactor) writeTx(tx []byte) error {
-	txBase64 := base64.StdEncoding.EncodeToString(tx)
-	paramsJSON, err := json.Marshal(map[string]interface{}{"tx": txBase64})
+	// txBase64 := base64.StdEncoding.EncodeToString(tx)
+	// paramsJSON, err := json.Marshal(map[string]interface{}{"tx": txBase64})
+	// if err != nil {
+	// 	return err
+	// }
+	// _ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
+	// return t.conn.WriteJSON(RPCRequest{
+	// 	JSONRPC: "2.0",
+	// 	ID:      jsonRPCID,
+	// 	Method:  t.broadcastTxMethod,
+	// 	Params:  json.RawMessage(paramsJSON),
+	// })
+	ctx := context.Background()
+	// ctx, cancel := context.WithTimeout(context.Background(), connSendTimeout)
+	// defer cancel()
+	txClient := txtypes.NewServiceClient(t.grpcConn)
+	grpcRes, err := txClient.BroadcastTx(
+		ctx,
+		&txtypes.BroadcastTxRequest{
+			Mode:    txtypes.BroadcastMode_BROADCAST_MODE_SYNC,
+			TxBytes: tx, // Proto-binary of the signed transaction, see previous step.
+		},
+	)
+
 	if err != nil {
 		return err
 	}
-	_ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
-	return t.conn.WriteJSON(RPCRequest{
-		JSONRPC: "2.0",
-		ID:      jsonRPCID,
-		Method:  t.broadcastTxMethod,
-		Params:  json.RawMessage(paramsJSON),
-	})
+
+	if grpcRes.TxResponse.Code != 0 {
+		return fmt.Errorf("Error while sending tx: %s", grpcRes.TxResponse.String())
+	}
+
+	return nil
 }
 
 func (t *Transactor) mustStop() bool {
@@ -517,5 +547,12 @@ func (t *Transactor) close() {
 		t.logger.Error("Failed to write close message", "err", err)
 	} else {
 		t.logger.Debug("Wrote close message to remote endpoint")
+	}
+
+	err = t.grpcConn.Close()
+	if err != nil {
+		t.logger.Error("Failed to close grpc endpoint", "err", err)
+	} else {
+		t.logger.Debug("Wrote close message to remote grpc endpoint")
 	}
 }
