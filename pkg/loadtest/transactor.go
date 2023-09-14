@@ -417,10 +417,20 @@ func (t *Transactor) writeTx(tx []byte) error {
 	// ctx, cancel := context.WithTimeout(context.Background(), connSendTimeout)
 	// defer cancel()
 	txClient := txtypes.NewServiceClient(t.grpcConn)
+	var mode txtypes.BroadcastMode
+	if t.config.BroadcastTxMethod == "sync" {
+		mode = txtypes.BroadcastMode_BROADCAST_MODE_SYNC
+	} else if t.config.BroadcastTxMethod == "async" {
+		mode = txtypes.BroadcastMode_BROADCAST_MODE_ASYNC
+	} else if t.config.BroadcastTxMethod == "commit" {
+		mode = txtypes.BroadcastMode_BROADCAST_MODE_BLOCK
+	} else {
+		return fmt.Errorf("Unknown broadcast mode %s", t.config.BroadcastTxMethod)
+	}
 	grpcRes, err := txClient.BroadcastTx(
 		ctx,
 		&txtypes.BroadcastTxRequest{
-			Mode:    txtypes.BroadcastMode_BROADCAST_MODE_SYNC,
+			Mode:    mode,
 			TxBytes: tx, // Proto-binary of the signed transaction, see previous step.
 		},
 	)
