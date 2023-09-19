@@ -413,7 +413,7 @@ func (t *Transactor) writeTx(tx []byte) error {
 	// 	Params:  json.RawMessage(paramsJSON),
 	// })
 
-	txHex := hex.EncodeToString(tx)
+	txHex := "0x" + hex.EncodeToString(tx)
 	paramsJSON, err := json.Marshal([]string{txHex})
 	if err != nil {
 		return err
