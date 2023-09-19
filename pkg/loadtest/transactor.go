@@ -1,7 +1,8 @@
 package loadtest
 
 import (
-	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/url"
@@ -13,8 +14,6 @@ import (
 	"github.com/sagaxyz/tm-load-test/internal/logging"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 )
 
 const (
@@ -413,37 +412,50 @@ func (t *Transactor) writeTx(tx []byte) error {
 	// 	Method:  t.broadcastTxMethod,
 	// 	Params:  json.RawMessage(paramsJSON),
 	// })
-	ctx := context.Background()
-	// ctx, cancel := context.WithTimeout(context.Background(), connSendTimeout)
-	// defer cancel()
-	txClient := txtypes.NewServiceClient(t.grpcConn)
-	var mode txtypes.BroadcastMode
-	if t.config.BroadcastTxMethod == "sync" {
-		mode = txtypes.BroadcastMode_BROADCAST_MODE_SYNC
-	} else if t.config.BroadcastTxMethod == "async" {
-		mode = txtypes.BroadcastMode_BROADCAST_MODE_ASYNC
-	} else if t.config.BroadcastTxMethod == "commit" {
-		mode = txtypes.BroadcastMode_BROADCAST_MODE_BLOCK
-	} else {
-		return fmt.Errorf("Unknown broadcast mode %s", t.config.BroadcastTxMethod)
-	}
-	grpcRes, err := txClient.BroadcastTx(
-		ctx,
-		&txtypes.BroadcastTxRequest{
-			Mode:    mode,
-			TxBytes: tx, // Proto-binary of the signed transaction, see previous step.
-		},
-	)
 
+	txHex := hex.EncodeToString(tx)
+	paramsJSON, err := json.Marshal([]string{txHex})
 	if err != nil {
 		return err
 	}
+	_ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
+	return t.conn.WriteJSON(RPCRequest{
+		JSONRPC: "2.0",
+		ID:      jsonRPCID,
+		Method:  "eth_sendRawTransaction",
+		Params:  json.RawMessage(paramsJSON),
+	})
 
-	if grpcRes.TxResponse.Code != 0 {
-		return fmt.Errorf("Error while sending tx: %s", grpcRes.TxResponse.String())
-	}
+	// ctx, cancel := context.WithTimeout(context.Background(), connSendTimeout)
+	// defer cancel()
+	// txClient := txtypes.NewServiceClient(t.grpcConn)
+	// var mode txtypes.BroadcastMode
+	// if t.config.BroadcastTxMethod == "sync" {
+	// 	mode = txtypes.BroadcastMode_BROADCAST_MODE_SYNC
+	// } else if t.config.BroadcastTxMethod == "async" {
+	// 	mode = txtypes.BroadcastMode_BROADCAST_MODE_ASYNC
+	// } else if t.config.BroadcastTxMethod == "commit" {
+	// 	mode = txtypes.BroadcastMode_BROADCAST_MODE_BLOCK
+	// } else {
+	// 	return fmt.Errorf("Unknown broadcast mode %s", t.config.BroadcastTxMethod)
+	// }
+	// grpcRes, err := txClient.BroadcastTx(
+	// 	ctx,
+	// 	&txtypes.BroadcastTxRequest{
+	// 		Mode:    mode,
+	// 		TxBytes: tx, // Proto-binary of the signed transaction, see previous step.
+	// 	},
+	// )
 
-	return nil
+	// if err != nil {
+	// 	return err
+	// }
+
+	// if grpcRes.TxResponse.Code != 0 {
+	// 	return fmt.Errorf("Error while sending tx: %s", grpcRes.TxResponse.String())
+	// }
+
+	// return nil
 }
 
 func (t *Transactor) mustStop() bool {
