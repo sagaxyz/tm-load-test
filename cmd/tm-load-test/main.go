@@ -44,6 +44,6 @@ func main() {
 		AppName:              "tm-load-test",
 		AppShortDesc:         "Load testing application for Tendermint kvstore",
 		AppLongDesc:          appLongDesc,
-		DefaultClientFactory: "kvstore",
+		DefaultClientFactory: "evm",
 	})
 }

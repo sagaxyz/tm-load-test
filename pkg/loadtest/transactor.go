@@ -154,7 +154,7 @@ func (t *Transactor) receiveLoop() {
 	defer t.wg.Done()
 	for {
 		// right now we don't care about what we read back from the RPC endpoint
-		_, _, err := t.conn.ReadMessage()
+		_, reply, err := t.conn.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				t.logger.Error("Failed to read response on connection", "err", err)
@@ -163,6 +163,14 @@ func (t *Transactor) receiveLoop() {
 		}
 		if t.mustStop() {
 			return
+		}
+		var response RPCResponse
+		err = json.Unmarshal(reply, &response)
+		if err != nil {
+			t.logger.Error("Error detected", "err", err)
+		}
+		if response.Error != nil {
+			t.logger.Error("Error detected in response message", "err", response.Error.Message)
 		}
 	}
 }
