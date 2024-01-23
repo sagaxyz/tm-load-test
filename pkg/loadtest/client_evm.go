@@ -332,7 +332,7 @@ func (c *EvmClient) prepareSmartContractTx(functionName, abiStr string, contract
 	if err != nil {
 		return nil, fmt.Errorf("unable to calculate gas price: %v", err)
 	}
-	gasLimit := uint64(200000)
+	gasLimit := uint64(100000)
 	tx := types.NewTransaction(c.nonce, contractAddress, big.NewInt(0), gasLimit, gasPrice, data)
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(c.networkId), c.privateKey)
