@@ -4,7 +4,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
+	"net/http"
 	"net/url"
 	"sort"
 	"sync"
@@ -15,7 +17,7 @@ import (
 )
 
 const (
-	connSendTimeout = 10 * time.Second
+	connSendTimeout = 60 * time.Second
 	// see https://github.com/tendermint/tendermint/blob/v0.32.x/rpc/lib/server/handlers.go
 	connPingPeriod = (30 * 9 / 10) * time.Second
 
@@ -32,7 +34,6 @@ type Transactor struct {
 
 	client            Client
 	logger            logging.Logger
-	conn              *websocket.Conn
 	broadcastTxMethod string
 	wg                sync.WaitGroup
 
@@ -56,6 +57,10 @@ type Transactor struct {
 	stopErr error // Did an error occur that triggered the stop?
 }
 
+var conn *websocket.Conn
+var finalStop sync.Mutex
+var readOnce bool = false
+
 // NewTransactor initiates a WebSockets connection to the given host address.
 // Must be a valid WebSockets URL, e.g. "ws://host:port/websocket"
 func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
@@ -74,21 +79,13 @@ func NewTransactor(remoteAddr string, config *Config) (*Transactor, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", remoteAddr, resp.Status, resp.StatusCode)
-	}
 	logger := logging.NewLogrusLogger(fmt.Sprintf("transactor[%s]", u.String()))
-	logger.Info("Connected to remote Tendermint WebSockets RPC")
+
 	return &Transactor{
 		remoteAddr:               u.String(),
 		config:                   config,
 		client:                   client,
 		logger:                   logger,
-		conn:                     conn,
 		broadcastTxMethod:        "broadcast_tx_" + config.BroadcastTxMethod,
 		progressCallbackInterval: defaultProgressCallbackInterval,
 		descL:                    make([]*loadDesc, 0, 100),
@@ -107,6 +104,33 @@ func (t *Transactor) SetProgressCallback(id int, interval time.Duration, callbac
 // reading from the WebSockets endpoint, and one for writing to it).
 func (t *Transactor) Start() {
 	t.logger.Debug("Starting transactor")
+	finalStop.Lock()
+	defer finalStop.Unlock()
+	if conn == nil {
+		t.logger.Info("Dialing...")
+		var resp *http.Response
+		var err error
+		conn, resp, err = websocket.DefaultDialer.Dial(t.remoteAddr, nil)
+		if err != nil {
+			t.logger.Error("dial failed: %v", err)
+			return
+		}
+		if resp.StatusCode >= 400 {
+			t.logger.Error("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", t.remoteAddr, resp.Status, resp.StatusCode)
+			return
+		}
+		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
+
+		conn.SetPingHandler(func(message string) error {
+			t.logger.Info("Pong")
+			err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(connSendTimeout))
+			if err == websocket.ErrCloseSent {
+				return nil
+			}
+			return err
+		})
+		go pinger()
+	}
 	t.wg.Add(2)
 	go t.receiveLoop()
 	go t.sendLoop()
@@ -150,27 +174,58 @@ func (t *Transactor) GetTxRate() float64 {
 	return t.txRate
 }
 
-func (t *Transactor) receiveLoop() {
-	defer t.wg.Done()
-	for {
-		// right now we don't care about what we read back from the RPC endpoint
-		_, reply, err := t.conn.ReadMessage()
-		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				t.logger.Error("Failed to read response on connection", "err", err)
+func pinger() {
+	if conn != nil {
+		pingTicker := time.NewTicker(connPingPeriod)
+		defer func() {
+			pingTicker.Stop()
+		}()
+		for range pingTicker.C {
+			if err := sendPing(); err != nil {
 				return
+				// t.logger.Error("Failed to write ping message", "err", err)
+				// t.setStop(err)
 			}
+			// if t.mustStop() {
+			// 	t.close()
+			// 	return
+			// }
+			// }
 		}
-		if t.mustStop() {
-			return
-		}
-		var response RPCResponse
-		err = json.Unmarshal(reply, &response)
-		if err != nil {
-			t.logger.Error("Error detected", "err", err)
-		}
-		if response.Error != nil {
-			t.logger.Error("Error detected in response message", "err", response.Error.Message)
+	}
+}
+
+func (t *Transactor) receiveLoop() {
+	if conn != nil {
+		defer t.wg.Done()
+		finalStop.Lock()
+		if !readOnce {
+			readOnce = true
+			finalStop.Unlock()
+			for {
+				// right now we don't care about what we read back from the RPC endpoint
+				// t.logger.Info("Trying to read message...")
+				_, reply, err := conn.ReadMessage()
+				if err != nil {
+					if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+						t.logger.Error("Failed to read response on connection", "err", err)
+						return
+					}
+				}
+				if t.mustStop() {
+					return
+				}
+				var response RPCResponse
+				err = json.Unmarshal(reply, &response)
+				if err != nil {
+					t.logger.Error("Error detected", "err", err)
+				}
+				if response.Error != nil {
+					t.logger.Error("Error detected in response message", "err", response.Error.Message)
+				}
+			}
+		} else {
+			finalStop.Unlock()
 		}
 	}
 }
@@ -345,59 +400,66 @@ func (t *Transactor) pNth(descL []*loadDesc, nth int) *DescPercentile {
 }
 
 func (t *Transactor) sendLoop() {
+	// finalStop.Lock()
+	// defer finalStop.Unlock()
 	defer t.wg.Done()
-	t.conn.SetPingHandler(func(message string) error {
-		err := t.conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(connSendTimeout))
-		if err == websocket.ErrCloseSent {
-			return nil
-		}
-		return err
-	})
+	if conn != nil {
+		// conn.SetPingHandler(func(message string) error {
+		// 	t.logger.Info("Pong")
+		// 	err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(connSendTimeout))
+		// 	if err == websocket.ErrCloseSent {
+		// 		return nil
+		// 	}
+		// 	return err
+		// })
 
-	pingTicker := time.NewTicker(connPingPeriod)
-	timeLimitTicker := time.NewTicker(time.Duration(t.config.Time) * time.Second)
-	sendTicker := time.NewTicker(time.Duration(t.config.SendPeriod) * time.Second)
-	progressTicker := time.NewTicker(t.getProgressCallbackInterval())
-	defer func() {
-		pingTicker.Stop()
-		timeLimitTicker.Stop()
-		sendTicker.Stop()
-		progressTicker.Stop()
-	}()
+		// pingTicker := time.NewTicker(connPingPeriod)
+		timeLimitTicker := time.NewTicker(time.Duration(t.config.Time) * time.Second)
+		sendTicker := time.NewTicker(time.Duration(t.config.SendPeriod) * time.Second)
+		progressTicker := time.NewTicker(t.getProgressCallbackInterval())
+		defer func() {
+			// pingTicker.Stop()
+			timeLimitTicker.Stop()
+			sendTicker.Stop()
+			progressTicker.Stop()
+		}()
 
-	defer t.processStats()
+		defer t.processStats()
 
-	for {
-		if t.config.Count > 0 && t.GetTxCount() >= t.config.Count {
-			t.logger.Info("Maximum transaction limit reached", "count", t.GetTxCount())
-			t.setStop(nil)
-		}
-		select {
-		case <-sendTicker.C:
-			if err := t.sendTransactions(); err != nil {
-				t.logger.Error("Failed to send transactions", "err", err)
-				t.setStop(err)
+		for {
+			if t.config.Count > 0 && t.GetTxCount() >= t.config.Count {
+				t.logger.Info("Maximum transaction limit reached", "count", t.GetTxCount())
+				t.setStop(nil)
 			}
+			select {
+			case <-sendTicker.C:
+				if err := t.sendTransactions(); err != nil {
+					t.logger.Error("Failed to send transactions", "err", err)
+					t.setStop(err)
+				}
 
-		case <-progressTicker.C:
-			t.reportProgress()
+			case <-progressTicker.C:
+				t.reportProgress()
 
-		case <-pingTicker.C:
-			if err := t.sendPing(); err != nil {
-				t.logger.Error("Failed to write ping message", "err", err)
-				t.setStop(err)
+			// case <-pingTicker.C:
+			// 	if err := t.sendPing(); err != nil {
+			// 		t.logger.Error("Failed to write ping message", "err", err)
+			// 		t.setStop(err)
+			// 	}
+
+			case <-timeLimitTicker.C:
+				t.logger.Info("Time limit reached for load testing")
+				t.setStop(nil)
 			}
-
-		case <-timeLimitTicker.C:
-			t.logger.Info("Time limit reached for load testing")
-			t.setStop(nil)
-		}
-		if t.mustStop() {
-			t.close()
-			return
+			if t.mustStop() {
+				t.close()
+				return
+			}
 		}
 	}
 }
+
+var txCounter int = 0
 
 func (t *Transactor) writeTx(tx []byte) error {
 	txHex := "0x" + hex.EncodeToString(tx)
@@ -405,13 +467,20 @@ func (t *Transactor) writeTx(tx []byte) error {
 	if err != nil {
 		return err
 	}
-	_ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
-	return t.conn.WriteJSON(RPCRequest{
-		JSONRPC: "2.0",
-		ID:      jsonRPCID,
-		Method:  "eth_sendRawTransaction",
-		Params:  json.RawMessage(paramsJSON),
-	})
+	finalStop.Lock()
+	defer finalStop.Unlock()
+	if conn != nil {
+		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
+		txCounter++
+		t.logger.Info("writejson", "counter", txCounter)
+		return conn.WriteJSON(RPCRequest{
+			JSONRPC: "2.0",
+			ID:      jsonRPCID,
+			Method:  "eth_sendRawTransaction",
+			Params:  json.RawMessage(paramsJSON),
+		})
+	}
+	return nil
 }
 
 func (t *Transactor) mustStop() bool {
@@ -493,9 +562,15 @@ func (t *Transactor) trackSentTxs(count int, byteCount int64) {
 	}
 }
 
-func (t *Transactor) sendPing() error {
-	_ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
-	return t.conn.WriteMessage(websocket.PingMessage, []byte{})
+func sendPing() error {
+	finalStop.Lock()
+	defer finalStop.Unlock()
+	if conn != nil {
+		log.Print("Ping")
+		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
+		return conn.WriteMessage(websocket.PingMessage, []byte{})
+	}
+	return nil
 }
 
 func (t *Transactor) reportProgress() {
@@ -519,11 +594,18 @@ func (t *Transactor) getProgressCallbackInterval() time.Duration {
 
 func (t *Transactor) close() {
 	// try to cleanly shut down the connection
-	_ = t.conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
-	err := t.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	if err != nil {
-		t.logger.Error("Failed to write close message", "err", err)
-	} else {
-		t.logger.Debug("Wrote close message to remote endpoint")
+	finalStop.Lock()
+	defer finalStop.Unlock()
+	if conn != nil {
+		t.logger.Info("Closing connection...")
+		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
+		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		if err != nil {
+			t.logger.Error("Failed to write close message", "err", err)
+		} else {
+			t.logger.Debug("Wrote close message to remote endpoint")
+		}
 	}
+	conn = nil
+	t.logger.Info("conn is nil now")
 }
