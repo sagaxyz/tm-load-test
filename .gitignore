@@ -28,3 +28,6 @@ __pycache__
 venv/
 /deployment/hosts
 coverage.txt
+
+# keys
+keys.dat*
