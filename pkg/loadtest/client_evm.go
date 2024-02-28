@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -27,8 +29,10 @@ type EvmClientFactory struct {
 	erc20Address      common.Address
 	erc721Address     common.Address
 	erc1155Address    common.Address
+	seededAccounts    []account
 	preseededAccounts []account
 	startFrom         int
+	m                 sync.Mutex
 }
 
 const ERC20abi = "[{\"constant\":false,\"inputs\":[{\"name\":\"_to\",\"type\":\"address\"},{\"name\":\"_value\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}],\"type\":\"function\"}]"
@@ -58,8 +62,9 @@ var (
 
 var (
 	client               *ethclient.Client
-	numAccountsPerClient int = 200
-	keysFileName             = "keys.dat"
+	numAccountsPerClient = 100
+	numPreseededAccounts = 25
+	keysFileName         = "keys.dat"
 )
 
 func init() {
@@ -154,7 +159,8 @@ func NewEvmClientFactory() *EvmClientFactory {
 	address := crypto.PubkeyToAddress(*publicKeyECDSA)
 	logrus.Infof("main address: %s", address.String())
 
-	preseededAccs := loadKeys()
+	seededAccs := loadKeys()
+	preseededAccs := make([]account, 0)
 
 	return &EvmClientFactory{
 		mainPrivKey:       privateKey,
@@ -162,6 +168,7 @@ func NewEvmClientFactory() *EvmClientFactory {
 		erc20Address:      common.HexToAddress(erc20Address),
 		erc721Address:     common.HexToAddress(erc721Address),
 		erc1155Address:    common.HexToAddress(erc1155Address),
+		seededAccounts:    seededAccs,
 		preseededAccounts: preseededAccs,
 		startFrom:         0,
 	}
@@ -177,6 +184,98 @@ type account struct {
 	privateKey *ecdsa.PrivateKey
 	address    common.Address
 	nonce      uint64
+}
+
+func (f *EvmClientFactory) seedAccount(value, chainID *big.Int, seedingKey *ecdsa.PrivateKey, nonce uint64, accounts *[]account) error {
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		return fmt.Errorf("unable to generate ECDSA private key: %v", err)
+	}
+
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("error casting public key to ECDSA")
+	}
+	addrNew := crypto.PubkeyToAddress(*publicKeyECDSA)
+	logrus.Infof("generated new client address: %s", addrNew.Hex())
+
+	balance, err := client.BalanceAt(context.Background(), f.mainAddress, nil)
+	if err != nil {
+		return fmt.Errorf("unable to get balance: %v", err)
+	}
+	logrus.Infof("main balance: %s", balance.String())
+
+	// generate tx and send funds to a new account
+	gasLimit := uint64(21000)
+	gasPrice := big.NewInt(1000000000)
+
+	tx := types.NewTransaction(nonce, addrNew, value, gasLimit, gasPrice, nil)
+
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), seedingKey)
+	if err != nil {
+		return fmt.Errorf("cannot sign tx: %v", err)
+	}
+
+	err = client.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		return fmt.Errorf("unable to send transaction: %v", err)
+	}
+
+	// send ERC20 tokens
+	contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
+	if err != nil {
+		return fmt.Errorf("unable to get abi: %v", err)
+	}
+	contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
+	if err != nil {
+		return fmt.Errorf("unable to create contract instance: %v", err)
+	}
+	auth, err := bind.NewKeyedTransactorWithChainID(f.mainPrivKey, chainID)
+	if err != nil {
+		return fmt.Errorf("unable to create keyed transactor: %v", err)
+	}
+
+	tokensToSend := big.NewInt(1000000000)
+	_, err = contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
+	if err != nil {
+		return fmt.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
+	}
+
+	// send some of ERC1155 tokens
+	contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
+	if err != nil {
+		return fmt.Errorf("unable to get abi: %v", err)
+	}
+	contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
+	if err != nil {
+		return fmt.Errorf("unable to create ERC1155 contract instance: %v", err)
+	}
+
+	tokenId := big.NewInt(1)
+	_, err = contractInstance.Transact(auth, "safeTransferFrom", f.mainAddress, addrNew, tokenId, tokensToSend, []byte{})
+	if err != nil {
+		return fmt.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
+	}
+	// _, err = bind.WaitMined(context.Background(), client, erc1155tx)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("WaitMined failed: %v", err)
+	// }
+
+	// newNonce, err := client.PendingNonceAt(context.Background(), addrNew)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("unable to get nonce: %v", err)
+	// }
+
+	newAcc := account{
+		privateKey: privateKey,
+		address:    addrNew,
+	}
+
+	f.m.Lock()
+	defer f.m.Unlock()
+	*accounts = append(*accounts, newAcc)
+	return nil
 }
 
 func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
@@ -199,18 +298,21 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 		return nil, fmt.Errorf("unable to get network id: %v", err)
 	}
 
-	if f.startFrom+numAccountsPerClient < len(f.preseededAccounts) {
-		logrus.Infof("reusing %d preseeded accounts", numAccountsPerClient)
-		reusedAccs := f.preseededAccounts[f.startFrom : f.startFrom+numAccountsPerClient]
+	if f.startFrom+numAccountsPerClient <= len(f.seededAccounts) {
+		logrus.Infof("reusing %d seeded accounts", numAccountsPerClient)
+		reusedAccs := f.seededAccounts[f.startFrom : f.startFrom+numAccountsPerClient]
 		f.startFrom += numAccountsPerClient
 
 		for i, acc := range reusedAccs {
+			logrus.Infof("getting nonce for account %s", acc.address)
 			newNonce, err := client.PendingNonceAt(context.Background(), acc.address)
 			if err != nil {
 				return nil, fmt.Errorf("unable to get nonce: %v", err)
 			}
 			reusedAccs[i].nonce = newNonce
 		}
+
+		logrus.Info("got all nonces")
 
 		return &EvmClient{
 			accounts:        reusedAccs,
@@ -222,6 +324,33 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 		}, nil
 	}
 
+	if len(f.preseededAccounts) == 0 {
+		value, b := new(big.Int).SetString("1000000000000000000000", 10) // in wei (1000 eth)
+		if !b {
+			return nil, fmt.Errorf("Unable to convert string to big.Int")
+		}
+		for i := 0; i < numPreseededAccounts; i++ {
+			nonce, err := client.PendingNonceAt(context.Background(), f.mainAddress)
+			if err != nil {
+				return nil, fmt.Errorf("unable to get nonce: %v", err)
+			}
+			err = f.seedAccount(value, chainID, f.mainPrivKey, nonce, &f.preseededAccounts)
+			if err != nil {
+				return nil, fmt.Errorf("Unable to seed account: %v", err)
+			}
+		}
+		time.Sleep(5 * time.Second)
+		for _, acc := range f.preseededAccounts {
+			balance, err := client.BalanceAt(context.Background(), acc.address, nil)
+			if err != nil {
+				return nil, fmt.Errorf("unable to get balance: %v", err)
+			}
+			logrus.Infof("seed account %s balance: %s", acc.address, balance.String())
+		}
+	}
+
+	logrus.Infof("Preseeded accounts: %d", len(f.preseededAccounts))
+
 	// create new accounts
 	keysFile, err := os.OpenFile(keysFileName, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -229,118 +358,110 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 	}
 	defer keysFile.Close()
 
+	// nonce, err := client.PendingNonceAt(context.Background(), f.mainAddress)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("unable to get nonce: %v", err)
+	// }
+
 	accounts := make([]account, 0)
-	for i := 0; i < numAccountsPerClient; i++ {
-		privateKey, err := crypto.GenerateKey()
-		if err != nil {
-			return nil, fmt.Errorf("unable to generate ECDSA private key: %v", err)
-		}
+	value, b := new(big.Int).SetString("1000000000000000000", 10) // in wei (1 eth)
+	if !b {
+		return nil, fmt.Errorf("Unable to convert string to big.Int")
+	}
 
-		publicKey := privateKey.Public()
-		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, fmt.Errorf("error casting public key to ECDSA")
-		}
-		addrNew := crypto.PubkeyToAddress(*publicKeyECDSA)
-		logrus.Infof("generated new client address: %s", addrNew.Hex())
-
-		balance, err := client.BalanceAt(context.Background(), f.mainAddress, nil)
-		if err != nil {
-			return nil, fmt.Errorf("unable to get balance: %v", err)
-		}
-		logrus.Infof("main balance: %s", balance.String())
-
-		nonce, err := client.PendingNonceAt(context.Background(), f.mainAddress)
+	for i := range f.preseededAccounts {
+		nonce, err := client.PendingNonceAt(context.Background(), f.preseededAccounts[i].address)
 		if err != nil {
 			return nil, fmt.Errorf("unable to get nonce: %v", err)
 		}
+		f.preseededAccounts[i].nonce = nonce
+	}
 
-		// generate tx and send funds to a new account
-		value := big.NewInt(1000000000000000000) // in wei (1 eth)
-		gasLimit := uint64(21000)
-
-		gasPrice, err := client.SuggestGasPrice(context.Background())
-		if err != nil {
-			return nil, fmt.Errorf("unable to calculate gas price: %v", err)
+	for i := 0; i < numAccountsPerClient; i += numPreseededAccounts {
+		var wg sync.WaitGroup
+		for j := 0; j < numPreseededAccounts; j++ {
+			seedingKey := f.preseededAccounts[j].privateKey
+			seedingAddress := f.preseededAccounts[j].address
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var (
+					accounts *[]account = &accounts
+				)
+				privateKey, err := crypto.GenerateKey()
+				if err != nil {
+					logrus.Errorf("unable to generate ECDSA private key: %v", err)
+				}
+				publicKey := privateKey.Public()
+				publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+				if !ok {
+					logrus.Errorf("error casting public key to ECDSA")
+				}
+				addrNew := crypto.PubkeyToAddress(*publicKeyECDSA)
+				logrus.Infof("generated new client address: %s", addrNew.Hex())
+				nonce, err := client.PendingNonceAt(context.Background(), seedingAddress)
+				if err != nil {
+					logrus.Errorf("unable to get nonce: %v", err)
+				}
+				gasLimit := uint64(21000)
+				gasPrice := big.NewInt(10000000)
+				tx := types.NewTransaction(nonce, addrNew, value, gasLimit, gasPrice, nil)
+				signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), seedingKey)
+				if err != nil {
+					logrus.Errorf("cannot sign tx: %v", err)
+				}
+				err = client.SendTransaction(context.Background(), signedTx)
+				if err != nil {
+					logrus.Errorf("unable to send transaction: %v", err)
+				}
+				contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
+				if err != nil {
+					logrus.Errorf("unable to get abi: %v", err)
+				}
+				contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
+				if err != nil {
+					logrus.Errorf("unable to create contract instance: %v", err)
+				}
+				auth, err := bind.NewKeyedTransactorWithChainID(seedingKey, chainID)
+				if err != nil {
+					logrus.Errorf("unable to create keyed transactor: %v", err)
+				}
+				tokensToSend := big.NewInt(100000)
+				resTx, err := contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
+				if err != nil {
+					logrus.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
+				}
+				_, _ = bind.WaitMined(context.Background(), client, resTx)
+				contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
+				if err != nil {
+					logrus.Errorf("unable to get abi: %v", err)
+				}
+				contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
+				if err != nil {
+					logrus.Errorf("unable to create ERC1155 contract instance: %v", err)
+				}
+				tokenId := big.NewInt(1)
+				resTx, err = contractInstance.Transact(auth, "safeTransferFrom", seedingAddress, addrNew, tokenId, tokensToSend, []byte{})
+				if err != nil {
+					logrus.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
+				}
+				_, _ = bind.WaitMined(context.Background(), client, resTx)
+				newAcc := account{privateKey: privateKey, address: addrNew}
+				f.m.Lock()
+				defer f.m.Unlock()
+				*accounts = append(*accounts, newAcc)
+			}()
 		}
-
-		tx := types.NewTransaction(nonce, addrNew, value, gasLimit, gasPrice, nil)
-
-		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), f.mainPrivKey)
-		if err != nil {
-			return nil, fmt.Errorf("cannot sign tx: %v", err)
-		}
-
-		err = client.SendTransaction(context.Background(), signedTx)
-		if err != nil {
-			return nil, fmt.Errorf("unable to send transaction: %v", err)
-		}
-		// _, err = bind.WaitMined(context.Background(), client, signedTx)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("WaitMined failed: %v", err)
-		// }
-
-		// send ERC20 tokens
-		contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
-		if err != nil {
-			return nil, fmt.Errorf("unable to get abi: %v", err)
-		}
-		contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create contract instance: %v", err)
-		}
-		auth, err := bind.NewKeyedTransactorWithChainID(f.mainPrivKey, chainID)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create keyed transactor: %v", err)
-		}
-
-		tokensToSend := big.NewInt(1000000000)
-		_, err = contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
-		if err != nil {
-			return nil, fmt.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
-		}
-		// _, err = bind.WaitMined(context.Background(), client, erc20tx)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("WaitMined failed: %v", err)
-		// }
-
-		// send some of ERC1155 tokens
-		contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
-		if err != nil {
-			return nil, fmt.Errorf("unable to get abi: %v", err)
-		}
-		contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create ERC1155 contract instance: %v", err)
-		}
-
-		tokenId := big.NewInt(1)
-		_, err = contractInstance.Transact(auth, "safeTransferFrom", f.mainAddress, addrNew, tokenId, tokensToSend, []byte{})
-		if err != nil {
-			return nil, fmt.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
-		}
-		// _, err = bind.WaitMined(context.Background(), client, erc1155tx)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("WaitMined failed: %v", err)
-		// }
-
-		// newNonce, err := client.PendingNonceAt(context.Background(), addrNew)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("unable to get nonce: %v", err)
-		// }
-
-		newAcc := account{
-			privateKey: privateKey,
-			address:    addrNew,
-			// nonce:      newNonce,
-		}
-		accounts = append(accounts, newAcc)
-		hexKey := fmt.Sprintf("%064s", privateKey.D.Text(16))
+		wg.Wait()
+	}
+	for _, acc := range accounts {
+		hexKey := fmt.Sprintf("%064s", acc.privateKey.D.Text(16))
 		logrus.Info(hexKey)
 		_, err = keysFile.WriteString(hexKey + "\n")
 		if err != nil {
 			return nil, fmt.Errorf("unable to append new account to %s: %v", keysFileName, err)
 		}
+		// nonce += 3
 	}
 
 	return &EvmClient{
@@ -358,7 +479,6 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 // loadtest package, so don't worry about that. Only return an error here if you
 // want to completely fail the entire load test operation.
 func (c *EvmClient) GenerateTx() ([]byte, error) {
-	// accIndex := rand.Int() % numAccountsPerClient
 	privateKey, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate ECDSA private key: %v", err)
@@ -370,7 +490,7 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 		return nil, fmt.Errorf("error casting public key to ECDSA")
 	}
 	addrNew := crypto.PubkeyToAddress(*publicKeyECDSA)
-	logrus.Debugf("generated new random address: %s", addrNew.Hex())
+	logrus.Debugf("generated new address: %s", addrNew.Hex())
 
 	// if for some reason nonce desyncs, we need to update it
 	// calling PendingNonceAt every time does not work too well
@@ -382,7 +502,7 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	// }
 	// c.accounts[accIndex].nonce = newNonce
 
-	const nonceVerifyPeriod = 100
+	const nonceVerifyPeriod = 10
 	if c.accounts[c.lastAccountUsed].nonce%nonceVerifyPeriod == 0 {
 		logrus.Infof("updating nonce for client %s", c.accounts[c.lastAccountUsed].address)
 		newNonce, err := client.PendingNonceAt(context.Background(), c.accounts[c.lastAccountUsed].address)
@@ -395,15 +515,16 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	value := big.NewInt(1)
 	var tx []byte
 
-	// r := rand.Int() % 4
-	r := 2
+	r := rand.Int() % 4
+	// payload := randSeq(13500)
+	// r := 2
 	switch r {
 	case 0: // normal tokens
 		tx, err = c.prepareNormalTx(c.accounts[c.lastAccountUsed], addrNew, value)
 	case 1: // erc20
 		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, addrNew, value)
 	case 2: // erc721
-		payload := randSeq(13500)
+		payload := randSeq(100)
 		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, addrNew, payload)
 	case 3: // erc1155
 		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
@@ -467,12 +588,12 @@ func (c *EvmClient) prepareSmartContractTx(acc account, functionName, abiStr str
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to get nonce: %v", err)
 	// }
-	gasPrice := big.NewInt(1000000000)
+	gasPrice := big.NewInt(100)
 	// gasPrice, err := client.SuggestGasPrice(context.Background())
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to calculate gas price: %v", err)
 	// }
-	gasLimit := uint64(10000000)
+	gasLimit := uint64(100000)
 	tx := types.NewTransaction(acc.nonce, contractAddress, big.NewInt(0), gasLimit, gasPrice, data)
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(c.networkId), acc.privateKey)
