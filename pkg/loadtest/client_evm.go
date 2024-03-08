@@ -62,8 +62,8 @@ var (
 
 var (
 	client               *ethclient.Client
-	numAccountsPerClient = 100
-	numPreseededAccounts = 25
+	numAccountsPerClient = 1000
+	numPreseededAccounts = 10
 	keysFileName         = "keys.dat"
 )
 
@@ -228,13 +228,11 @@ func (f *EvmClientFactory) seedAccount(value, chainID *big.Int, seedingKey *ecds
 		return fmt.Errorf("unable to get abi: %v", err)
 	}
 	contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
-	if err != nil {
-		return fmt.Errorf("unable to create contract instance: %v", err)
-	}
 	auth, err := bind.NewKeyedTransactorWithChainID(f.mainPrivKey, chainID)
 	if err != nil {
 		return fmt.Errorf("unable to create keyed transactor: %v", err)
 	}
+	auth.GasLimit = 200000
 
 	tokensToSend := big.NewInt(1000000000)
 	_, err = contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
@@ -419,10 +417,8 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 					logrus.Errorf("unable to get abi: %v", err)
 				}
 				contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
-				if err != nil {
-					logrus.Errorf("unable to create contract instance: %v", err)
-				}
 				auth, err := bind.NewKeyedTransactorWithChainID(seedingKey, chainID)
+				auth.GasLimit = 200000
 				if err != nil {
 					logrus.Errorf("unable to create keyed transactor: %v", err)
 				}
@@ -502,32 +498,31 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	// }
 	// c.accounts[accIndex].nonce = newNonce
 
-	const nonceVerifyPeriod = 10
-	if c.accounts[c.lastAccountUsed].nonce%nonceVerifyPeriod == 0 {
-		logrus.Infof("updating nonce for client %s", c.accounts[c.lastAccountUsed].address)
-		newNonce, err := client.PendingNonceAt(context.Background(), c.accounts[c.lastAccountUsed].address)
-		if err != nil {
-			return nil, fmt.Errorf("unable to get nonce: %v", err)
-		}
-		c.accounts[c.lastAccountUsed].nonce = newNonce
-	}
+	// const nonceVerifyPeriod = 100
+	// if c.accounts[c.lastAccountUsed].nonce%nonceVerifyPeriod == 0 {
+	// 	logrus.Infof("updating nonce for client %s", c.accounts[c.lastAccountUsed].address)
+	// 	newNonce, err := client.PendingNonceAt(context.Background(), c.accounts[c.lastAccountUsed].address)
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("unable to get nonce: %v", err)
+	// 	}
+	// 	c.accounts[c.lastAccountUsed].nonce = newNonce
+	// }
 
 	value := big.NewInt(1)
 	var tx []byte
 
-	r := rand.Int() % 4
-	// payload := randSeq(13500)
-	// r := 2
+	// r := rand.Int() % 4
+	payload := randSeq(13500)
+	r := 2
 	switch r {
 	case 0: // normal tokens
 		tx, err = c.prepareNormalTx(c.accounts[c.lastAccountUsed], addrNew, value)
 	case 1: // erc20
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, addrNew, value)
+		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, uint64(70000), addrNew, value)
 	case 2: // erc721
-		payload := randSeq(100)
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, addrNew, payload)
+		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, uint64(9900000), addrNew, payload)
 	case 3: // erc1155
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
+		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, uint64(70000), c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
 	default:
 		panic("Should never happen")
 	}
@@ -563,6 +558,7 @@ func (c *EvmClient) prepareNormalTx(acc account, to common.Address, value *big.I
 	if err != nil {
 		return nil, fmt.Errorf("cannot sign tx: %v", err)
 	}
+	logrus.Infof("normal tx hash: %s", signedTx.Hash())
 
 	bytesData, err := signedTx.MarshalBinary()
 	if err != nil {
@@ -574,7 +570,7 @@ func (c *EvmClient) prepareNormalTx(acc account, to common.Address, value *big.I
 	return bytesData, nil
 }
 
-func (c *EvmClient) prepareSmartContractTx(acc account, functionName, abiStr string, contractAddress common.Address, args ...interface{}) ([]byte, error) {
+func (c *EvmClient) prepareSmartContractTx(acc account, functionName, abiStr string, contractAddress common.Address, gasLimit uint64, args ...interface{}) ([]byte, error) {
 	contractABI, err := abi.JSON(strings.NewReader(abiStr))
 	if err != nil {
 		return nil, fmt.Errorf("unable to get abi: %v", err)
@@ -593,13 +589,14 @@ func (c *EvmClient) prepareSmartContractTx(acc account, functionName, abiStr str
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to calculate gas price: %v", err)
 	// }
-	gasLimit := uint64(100000)
 	tx := types.NewTransaction(acc.nonce, contractAddress, big.NewInt(0), gasLimit, gasPrice, data)
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(c.networkId), acc.privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("cannot sign tx: %v", err)
 	}
+
+	logrus.Infof("contract tx hash: %s", signedTx.Hash())
 
 	bytesData, err := signedTx.MarshalBinary()
 	if err != nil {

@@ -17,13 +17,13 @@ import (
 )
 
 const (
-	connSendTimeout = 60 * time.Second
+	connSendTimeout = 300 * time.Second
 	// see https://github.com/tendermint/tendermint/blob/v0.32.x/rpc/lib/server/handlers.go
 	connPingPeriod = (30 * 9 / 10) * time.Second
 
 	jsonRPCID = -1
 
-	defaultProgressCallbackInterval = 5 * time.Second
+	defaultProgressCallbackInterval = 300 * time.Second
 )
 
 // Transactor represents a single wire-level connection to a Tendermint RPC
@@ -223,6 +223,14 @@ func (t *Transactor) receiveLoop() {
 				if response.Error != nil {
 					t.logger.Error("Error detected in response message", "err", response.Error.Message)
 				}
+				unm := ""
+				err = json.Unmarshal(response.Result, &unm)
+				if err != nil {
+					t.logger.Error("can't unmarshal json", "err", err)
+				}
+				rxCounter++
+				t.logger.Info("read", "counter", rxCounter)
+				t.logger.Info("read", "jsonrpc", unm)
 			}
 		} else {
 			finalStop.Unlock()
@@ -460,6 +468,7 @@ func (t *Transactor) sendLoop() {
 }
 
 var txCounter int = 0
+var rxCounter int = 0
 
 func (t *Transactor) writeTx(tx []byte) error {
 	txHex := "0x" + hex.EncodeToString(tx)
