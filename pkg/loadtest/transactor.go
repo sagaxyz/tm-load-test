@@ -131,8 +131,8 @@ func (t *Transactor) Start() {
 		})
 		go pinger()
 	}
-	t.wg.Add(2)
-	go t.receiveLoop()
+	t.wg.Add(1)
+	// go t.receiveLoop()
 	go t.sendLoop()
 }
 
@@ -461,7 +461,7 @@ func (t *Transactor) sendLoop() {
 			}
 			if t.mustStop() {
 				t.close()
-				return
+				// return
 			}
 		}
 	}
@@ -503,6 +503,7 @@ func (t *Transactor) writeTx(tx []byte) error {
 			return err
 		}
 		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
+		t.releaseStop()
 		go pinger()
 	}
 	return nil
@@ -520,6 +521,12 @@ func (t *Transactor) setStop(err error) {
 	if err != nil {
 		t.stopErr = err
 	}
+	t.stopMtx.Unlock()
+}
+
+func (t *Transactor) releaseStop() {
+	t.stopMtx.Lock()
+	t.stop = false
 	t.stopMtx.Unlock()
 }
 
