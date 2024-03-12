@@ -508,7 +508,7 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	var tx []byte
 
 	// r := rand.Int() % 4
-	payload := randSeq(13500)
+	payload := randSeq(500)
 	r := 2
 	switch r {
 	case 0: // normal tokens
@@ -516,7 +516,7 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	case 1: // erc20
 		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, uint64(70000), addrNew, value)
 	case 2: // erc721
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, uint64(9900000), addrNew, payload)
+		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, uint64(500000), addrNew, payload)
 	case 3: // erc1155
 		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, uint64(70000), c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
 	default:

@@ -113,8 +113,8 @@ func (t *Transactor) SetProgressCallback(id int, interval time.Duration, callbac
 // reading from the WebSockets endpoint, and one for writing to it).
 func (t *Transactor) Start() {
 	t.logger.Debug("Starting transactor")
-	finalStop.Lock()
-	defer finalStop.Unlock()
+	doLock()
+	defer doUnlock()
 	if conn == nil {
 		t.logger.Info("Dialing...")
 		var resp *http.Response
@@ -450,8 +450,7 @@ func (t *Transactor) sendLoop() {
 			if t.mustRestart() {
 				t.close()
 				t.logger.Error("conn is null, reconnecting...")
-				finalStop.Lock()
-				defer finalStop.Unlock()
+				doLock()
 				if conn == nil {
 					t.logger.Info("Dialing...")
 					var resp *http.Response
@@ -471,6 +470,7 @@ func (t *Transactor) sendLoop() {
 					t.stopMtx.Unlock()
 					go pinger()
 				}
+				doUnlock()
 			}
 		}
 	}
@@ -486,8 +486,8 @@ func (t *Transactor) writeTx(tx []byte) error {
 	if err != nil {
 		return err
 	}
-	finalStop.Lock()
-	defer finalStop.Unlock()
+	doLock()
+	defer doUnlock()
 	if conn != nil {
 		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
 		txCounter++
@@ -521,6 +521,14 @@ func (t *Transactor) setStop(level StopStatus, err error) {
 		t.stopErr = err
 	}
 	t.stopMtx.Unlock()
+}
+
+func doLock() {
+	finalStop.Lock()
+}
+
+func doUnlock() {
+	finalStop.Unlock()
 }
 
 type loadDesc struct {
@@ -588,8 +596,8 @@ func (t *Transactor) trackSentTxs(count int, byteCount int64) {
 }
 
 func sendPing() error {
-	finalStop.Lock()
-	defer finalStop.Unlock()
+	doLock()
+	defer doUnlock()
 	if conn != nil {
 		log.Print("Ping")
 		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
@@ -619,8 +627,8 @@ func (t *Transactor) getProgressCallbackInterval() time.Duration {
 
 func (t *Transactor) close() {
 	// try to cleanly shut down the connection
-	finalStop.Lock()
-	defer finalStop.Unlock()
+	doLock()
+	defer doUnlock()
 	if conn != nil {
 		t.logger.Info("Closing connection...")
 		_ = conn.SetWriteDeadline(time.Now().Add(connSendTimeout))
