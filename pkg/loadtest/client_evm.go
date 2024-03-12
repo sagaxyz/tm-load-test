@@ -246,10 +246,6 @@ func (f *EvmClientFactory) seedAccount(value, chainID *big.Int, seedingKey *ecds
 		return fmt.Errorf("unable to get abi: %v", err)
 	}
 	contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
-	if err != nil {
-		return fmt.Errorf("unable to create ERC1155 contract instance: %v", err)
-	}
-
 	tokenId := big.NewInt(1)
 	_, err = contractInstance.Transact(auth, "safeTransferFrom", f.mainAddress, addrNew, tokenId, tokensToSend, []byte{})
 	if err != nil {

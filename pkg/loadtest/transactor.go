@@ -488,6 +488,22 @@ func (t *Transactor) writeTx(tx []byte) error {
 			Method:  "eth_sendRawTransaction",
 			Params:  json.RawMessage(paramsJSON),
 		})
+	} else {
+		t.logger.Error("conn is null, reconnecting...")
+		t.logger.Info("Dialing...")
+		var resp *http.Response
+		var err error
+		conn, resp, err = websocket.DefaultDialer.Dial(t.remoteAddr, nil)
+		if err != nil {
+			t.logger.Error("dial failed: %v", err)
+			return err
+		}
+		if resp.StatusCode >= 400 {
+			t.logger.Error("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", t.remoteAddr, resp.Status, resp.StatusCode)
+			return err
+		}
+		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
+		go pinger()
 	}
 	return nil
 }
