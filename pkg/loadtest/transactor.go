@@ -26,6 +26,14 @@ const (
 	defaultProgressCallbackInterval = 300 * time.Second
 )
 
+type StopStatus int
+
+const (
+	Continue StopStatus = iota
+	StopAndRestart
+	HardStop
+)
+
 // Transactor represents a single wire-level connection to a Tendermint RPC
 // endpoint, and this is responsible for sending transactions to that endpoint.
 type Transactor struct {
@@ -53,7 +61,7 @@ type Transactor struct {
 	progressCallback         func(id int, txCount int, txBytes int64) // Called with the total number of transactions executed so far.
 
 	stopMtx sync.RWMutex
-	stop    bool
+	stop    StopStatus
 	stopErr error // Did an error occur that triggered the stop?
 }
 
@@ -122,7 +130,7 @@ func (t *Transactor) Start() {
 		}
 		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
 		t.stopMtx.Lock()
-		t.stop = false
+		t.stop = Continue
 		t.stopMtx.Unlock()
 		go pinger()
 	}
@@ -134,7 +142,7 @@ func (t *Transactor) Start() {
 // Cancel will indicate to the transactor that it must stop, but does not wait
 // until it has completely stopped. To wait, call the Transactor.Wait() method.
 func (t *Transactor) Cancel() {
-	t.setStop(fmt.Errorf("transactor operations cancelled"))
+	t.setStop(HardStop, fmt.Errorf("transactor operations cancelled"))
 }
 
 // Wait will block until the transactor terminates.
@@ -177,8 +185,8 @@ func pinger() {
 		}()
 		for range pingTicker.C {
 			if err := sendPing(); err != nil {
+				log.Printf("Failed to write ping message: %v", err)
 				return
-				// t.logger.Error("Failed to write ping message", "err", err)
 				// t.setStop(err)
 			}
 			// if t.mustStop() {
@@ -403,25 +411,12 @@ func (t *Transactor) pNth(descL []*loadDesc, nth int) *DescPercentile {
 }
 
 func (t *Transactor) sendLoop() {
-	// finalStop.Lock()
-	// defer finalStop.Unlock()
 	defer t.wg.Done()
 	if conn != nil {
-		// conn.SetPingHandler(func(message string) error {
-		// 	t.logger.Info("Pong")
-		// 	err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(connSendTimeout))
-		// 	if err == websocket.ErrCloseSent {
-		// 		return nil
-		// 	}
-		// 	return err
-		// })
-
-		// pingTicker := time.NewTicker(connPingPeriod)
 		timeLimitTicker := time.NewTicker(time.Duration(t.config.Time) * time.Second)
 		sendTicker := time.NewTicker(time.Duration(t.config.SendPeriod) * time.Second)
 		progressTicker := time.NewTicker(t.getProgressCallbackInterval())
 		defer func() {
-			// pingTicker.Stop()
 			timeLimitTicker.Stop()
 			sendTicker.Stop()
 			progressTicker.Stop()
@@ -432,31 +427,50 @@ func (t *Transactor) sendLoop() {
 		for {
 			if t.config.Count > 0 && t.GetTxCount() >= t.config.Count {
 				t.logger.Info("Maximum transaction limit reached", "count", t.GetTxCount())
-				t.setStop(nil)
+				t.setStop(HardStop, nil)
 			}
 			select {
 			case <-sendTicker.C:
 				if err := t.sendTransactions(); err != nil {
 					t.logger.Error("Failed to send transactions", "err", err)
-					t.setStop(err)
+					t.setStop(StopAndRestart, err)
 				}
 
 			case <-progressTicker.C:
 				t.reportProgress()
 
-			// case <-pingTicker.C:
-			// 	if err := t.sendPing(); err != nil {
-			// 		t.logger.Error("Failed to write ping message", "err", err)
-			// 		t.setStop(err)
-			// 	}
-
 			case <-timeLimitTicker.C:
 				t.logger.Info("Time limit reached for load testing")
-				t.setStop(nil)
+				t.setStop(HardStop, nil)
 			}
 			if t.mustStop() {
 				t.close()
 				return
+			}
+			if t.mustRestart() {
+				t.close()
+				t.logger.Error("conn is null, reconnecting...")
+				finalStop.Lock()
+				defer finalStop.Unlock()
+				if conn == nil {
+					t.logger.Info("Dialing...")
+					var resp *http.Response
+					var err error
+					conn, resp, err = websocket.DefaultDialer.Dial(t.remoteAddr, nil)
+					if err != nil {
+						t.logger.Error("dial failed: %v", err)
+						return
+					}
+					if resp.StatusCode >= 400 {
+						t.logger.Error("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", t.remoteAddr, resp.Status, resp.StatusCode)
+						return
+					}
+					t.logger.Info("Connected to remote Tendermint WebSockets RPC")
+					t.stopMtx.Lock()
+					t.stop = Continue
+					t.stopMtx.Unlock()
+					go pinger()
+				}
 			}
 		}
 	}
@@ -484,9 +498,6 @@ func (t *Transactor) writeTx(tx []byte) error {
 			Method:  "eth_sendRawTransaction",
 			Params:  json.RawMessage(paramsJSON),
 		})
-	} else {
-		t.logger.Error("conn is null, reconnecting...")
-		t.Start()
 	}
 	return nil
 }
@@ -494,12 +505,18 @@ func (t *Transactor) writeTx(tx []byte) error {
 func (t *Transactor) mustStop() bool {
 	t.stopMtx.RLock()
 	defer t.stopMtx.RUnlock()
-	return t.stop
+	return t.stop == HardStop
 }
 
-func (t *Transactor) setStop(err error) {
+func (t *Transactor) mustRestart() bool {
+	t.stopMtx.RLock()
+	defer t.stopMtx.RUnlock()
+	return t.stop == StopAndRestart
+}
+
+func (t *Transactor) setStop(level StopStatus, err error) {
 	t.stopMtx.Lock()
-	t.stop = true
+	t.stop = level
 	if err != nil {
 		t.stopErr = err
 	}
