@@ -494,15 +494,15 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	// }
 	// c.accounts[accIndex].nonce = newNonce
 
-	// const nonceVerifyPeriod = 100
-	// if c.accounts[c.lastAccountUsed].nonce%nonceVerifyPeriod == 0 {
-	// 	logrus.Infof("updating nonce for client %s", c.accounts[c.lastAccountUsed].address)
-	// 	newNonce, err := client.PendingNonceAt(context.Background(), c.accounts[c.lastAccountUsed].address)
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("unable to get nonce: %v", err)
-	// 	}
-	// 	c.accounts[c.lastAccountUsed].nonce = newNonce
-	// }
+	const nonceVerifyPeriod = 10
+	if c.accounts[c.lastAccountUsed].nonce%nonceVerifyPeriod == 0 {
+		logrus.Infof("updating nonce for client %s", c.accounts[c.lastAccountUsed].address)
+		newNonce, err := client.PendingNonceAt(context.Background(), c.accounts[c.lastAccountUsed].address)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get nonce: %v", err)
+		}
+		c.accounts[c.lastAccountUsed].nonce = newNonce
+	}
 
 	value := big.NewInt(1)
 	var tx []byte
