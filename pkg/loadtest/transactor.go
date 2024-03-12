@@ -59,7 +59,8 @@ type Transactor struct {
 
 var conn *websocket.Conn
 var finalStop sync.Mutex
-var readOnce bool = false
+
+// var readOnce bool = false
 
 // NewTransactor initiates a WebSockets connection to the given host address.
 // Must be a valid WebSockets URL, e.g. "ws://host:port/websocket"
@@ -120,15 +121,9 @@ func (t *Transactor) Start() {
 			return
 		}
 		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
-
-		conn.SetPingHandler(func(message string) error {
-			t.logger.Info("Pong")
-			err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(connSendTimeout))
-			if err == websocket.ErrCloseSent {
-				return nil
-			}
-			return err
-		})
+		t.stopMtx.Lock()
+		t.stop = false
+		t.stopMtx.Unlock()
 		go pinger()
 	}
 	t.wg.Add(1)
@@ -195,48 +190,48 @@ func pinger() {
 	}
 }
 
-func (t *Transactor) receiveLoop() {
-	if conn != nil {
-		defer t.wg.Done()
-		finalStop.Lock()
-		if !readOnce {
-			readOnce = true
-			finalStop.Unlock()
-			for {
-				// right now we don't care about what we read back from the RPC endpoint
-				// t.logger.Info("Trying to read message...")
-				_, reply, err := conn.ReadMessage()
-				if err != nil {
-					if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-						t.logger.Error("Failed to read response on connection", "err", err)
-						return
-					}
-				}
-				if t.mustStop() {
-					return
-				}
-				var response RPCResponse
-				err = json.Unmarshal(reply, &response)
-				if err != nil {
-					t.logger.Error("Error detected", "err", err)
-				}
-				if response.Error != nil {
-					t.logger.Error("Error detected in response message", "err", response.Error.Message)
-				}
-				unm := ""
-				err = json.Unmarshal(response.Result, &unm)
-				if err != nil {
-					t.logger.Error("can't unmarshal json", "err", err)
-				}
-				rxCounter++
-				t.logger.Info("read", "counter", rxCounter)
-				t.logger.Info("read", "jsonrpc", unm)
-			}
-		} else {
-			finalStop.Unlock()
-		}
-	}
-}
+// func (t *Transactor) receiveLoop() {
+// 	if conn != nil {
+// 		defer t.wg.Done()
+// 		finalStop.Lock()
+// 		if !readOnce {
+// 			readOnce = true
+// 			finalStop.Unlock()
+// 			for {
+// 				// right now we don't care about what we read back from the RPC endpoint
+// 				// t.logger.Info("Trying to read message...")
+// 				_, reply, err := conn.ReadMessage()
+// 				if err != nil {
+// 					if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+// 						t.logger.Error("Failed to read response on connection", "err", err)
+// 						return
+// 					}
+// 				}
+// 				if t.mustStop() {
+// 					return
+// 				}
+// 				var response RPCResponse
+// 				err = json.Unmarshal(reply, &response)
+// 				if err != nil {
+// 					t.logger.Error("Error detected", "err", err)
+// 				}
+// 				if response.Error != nil {
+// 					t.logger.Error("Error detected in response message", "err", response.Error.Message)
+// 				}
+// 				unm := ""
+// 				err = json.Unmarshal(response.Result, &unm)
+// 				if err != nil {
+// 					t.logger.Error("can't unmarshal json", "err", err)
+// 				}
+// 				rxCounter++
+// 				t.logger.Info("read", "counter", rxCounter)
+// 				t.logger.Info("read", "jsonrpc", unm)
+// 			}
+// 		} else {
+// 			finalStop.Unlock()
+// 		}
+// 	}
+// }
 
 func (t *Transactor) processStats() {
 	defer func() {
@@ -461,14 +456,15 @@ func (t *Transactor) sendLoop() {
 			}
 			if t.mustStop() {
 				t.close()
-				// return
+				return
 			}
 		}
 	}
 }
 
 var txCounter int = 0
-var rxCounter int = 0
+
+// var rxCounter int = 0
 
 func (t *Transactor) writeTx(tx []byte) error {
 	txHex := "0x" + hex.EncodeToString(tx)
@@ -490,21 +486,7 @@ func (t *Transactor) writeTx(tx []byte) error {
 		})
 	} else {
 		t.logger.Error("conn is null, reconnecting...")
-		t.logger.Info("Dialing...")
-		var resp *http.Response
-		var err error
-		conn, resp, err = websocket.DefaultDialer.Dial(t.remoteAddr, nil)
-		if err != nil {
-			t.logger.Error("dial failed: %v", err)
-			return err
-		}
-		if resp.StatusCode >= 400 {
-			t.logger.Error("failed to connect to remote WebSockets endpoint %s: %s (status code %d)", t.remoteAddr, resp.Status, resp.StatusCode)
-			return err
-		}
-		t.logger.Info("Connected to remote Tendermint WebSockets RPC")
-		t.releaseStop()
-		go pinger()
+		t.Start()
 	}
 	return nil
 }
@@ -521,12 +503,6 @@ func (t *Transactor) setStop(err error) {
 	if err != nil {
 		t.stopErr = err
 	}
-	t.stopMtx.Unlock()
-}
-
-func (t *Transactor) releaseStop() {
-	t.stopMtx.Lock()
-	t.stop = false
 	t.stopMtx.Unlock()
 }
 
