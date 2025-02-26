@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -24,11 +23,11 @@ import (
 
 // EvmClientFactory creates instances of EvmClient
 type EvmClientFactory struct {
-	mainPrivKey       *ecdsa.PrivateKey
-	mainAddress       common.Address
-	erc20Address      common.Address
-	erc721Address     common.Address
-	erc1155Address    common.Address
+	mainPrivKey *ecdsa.PrivateKey
+	mainAddress common.Address
+	// erc20Address      common.Address
+	// erc721Address     common.Address
+	// erc1155Address    common.Address
 	seededAccounts    []account
 	preseededAccounts []account
 	startFrom         int
@@ -47,11 +46,11 @@ type EvmClient struct {
 	// privateKey     *ecdsa.PrivateKey
 	// address        common.Address
 	// nonce          uint64
-	accounts        []account
-	networkId       *big.Int
-	erc20Address    common.Address
-	erc721Address   common.Address
-	erc1155Address  common.Address
+	accounts  []account
+	networkId *big.Int
+	// erc20Address    common.Address
+	// erc721Address   common.Address
+	// erc1155Address  common.Address
 	lastAccountUsed int
 }
 
@@ -62,7 +61,7 @@ var (
 
 var (
 	client               *ethclient.Client
-	numAccountsPerClient = 1000
+	numAccountsPerClient = 100
 	numPreseededAccounts = 10
 	keysFileName         = "keys.dat"
 )
@@ -78,7 +77,7 @@ func loadKeys() []account {
 	keyFile, err := os.Open(keysFileName)
 	if err != nil {
 		logrus.Warnf("unable to open %s: %v", keysFileName, err)
-		return nil
+		return []account{}
 	}
 	defer keyFile.Close()
 	fileScanner := bufio.NewScanner(keyFile)
@@ -123,26 +122,26 @@ func NewEvmClientFactory() *EvmClientFactory {
 		return nil
 	}
 
-	erc20AddressEnvVar := "ERC20_ADDRESS"
-	erc20Address := os.Getenv(erc20AddressEnvVar)
-	if erc20Address == "" {
-		logrus.Errorf("environment variable %s is not set", erc20AddressEnvVar)
-		return nil
-	}
+	// erc20AddressEnvVar := "ERC20_ADDRESS"
+	// erc20Address := os.Getenv(erc20AddressEnvVar)
+	// if erc20Address == "" {
+	// 	logrus.Errorf("environment variable %s is not set", erc20AddressEnvVar)
+	// 	return nil
+	// }
 
-	erc721AddressEnvVar := "ERC721_ADDRESS"
-	erc721Address := os.Getenv(erc721AddressEnvVar)
-	if erc721Address == "" {
-		logrus.Errorf("environment variable %s is not set", erc721AddressEnvVar)
-		return nil
-	}
+	// erc721AddressEnvVar := "ERC721_ADDRESS"
+	// erc721Address := os.Getenv(erc721AddressEnvVar)
+	// if erc721Address == "" {
+	// 	logrus.Errorf("environment variable %s is not set", erc721AddressEnvVar)
+	// 	return nil
+	// }
 
-	erc1155AddressEnvVar := "ERC1155_ADDRESS"
-	erc1155Address := os.Getenv(erc1155AddressEnvVar)
-	if erc1155Address == "" {
-		logrus.Errorf("environment variable %s is not set", erc1155AddressEnvVar)
-		return nil
-	}
+	// erc1155AddressEnvVar := "ERC1155_ADDRESS"
+	// erc1155Address := os.Getenv(erc1155AddressEnvVar)
+	// if erc1155Address == "" {
+	// 	logrus.Errorf("environment variable %s is not set", erc1155AddressEnvVar)
+	// 	return nil
+	// }
 
 	privateKey, err := crypto.HexToECDSA(mainPrivKeyHex)
 	if err != nil {
@@ -163,11 +162,11 @@ func NewEvmClientFactory() *EvmClientFactory {
 	preseededAccs := make([]account, 0)
 
 	return &EvmClientFactory{
-		mainPrivKey:       privateKey,
-		mainAddress:       address,
-		erc20Address:      common.HexToAddress(erc20Address),
-		erc721Address:     common.HexToAddress(erc721Address),
-		erc1155Address:    common.HexToAddress(erc1155Address),
+		mainPrivKey: privateKey,
+		mainAddress: address,
+		// erc20Address:      common.HexToAddress(erc20Address),
+		// erc721Address:     common.HexToAddress(erc721Address),
+		// erc1155Address:    common.HexToAddress(erc1155Address),
 		seededAccounts:    seededAccs,
 		preseededAccounts: preseededAccs,
 		startFrom:         0,
@@ -222,35 +221,35 @@ func (f *EvmClientFactory) seedAccount(value, chainID *big.Int, seedingKey *ecds
 		return fmt.Errorf("unable to send transaction: %v", err)
 	}
 
-	// send ERC20 tokens
-	contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
-	if err != nil {
-		return fmt.Errorf("unable to get abi: %v", err)
-	}
-	contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
-	auth, err := bind.NewKeyedTransactorWithChainID(f.mainPrivKey, chainID)
-	if err != nil {
-		return fmt.Errorf("unable to create keyed transactor: %v", err)
-	}
-	auth.GasLimit = 200000
+	// // send ERC20 tokens
+	// contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
+	// if err != nil {
+	// 	return fmt.Errorf("unable to get abi: %v", err)
+	// }
+	// contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
+	// auth, err := bind.NewKeyedTransactorWithChainID(f.mainPrivKey, chainID)
+	// if err != nil {
+	// 	return fmt.Errorf("unable to create keyed transactor: %v", err)
+	// }
+	// auth.GasLimit = 200000
 
-	tokensToSend := big.NewInt(1000000000)
-	_, err = contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
-	if err != nil {
-		return fmt.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
-	}
+	// tokensToSend := big.NewInt(1000000000)
+	// _, err = contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
+	// if err != nil {
+	// 	return fmt.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
+	// }
 
-	// send some of ERC1155 tokens
-	contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
-	if err != nil {
-		return fmt.Errorf("unable to get abi: %v", err)
-	}
-	contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
-	tokenId := big.NewInt(1)
-	_, err = contractInstance.Transact(auth, "safeTransferFrom", f.mainAddress, addrNew, tokenId, tokensToSend, []byte{})
-	if err != nil {
-		return fmt.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
-	}
+	// // send some of ERC1155 tokens
+	// contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
+	// if err != nil {
+	// 	return fmt.Errorf("unable to get abi: %v", err)
+	// }
+	// contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
+	// tokenId := big.NewInt(1)
+	// _, err = contractInstance.Transact(auth, "safeTransferFrom", f.mainAddress, addrNew, tokenId, tokensToSend, []byte{})
+	// if err != nil {
+	// 	return fmt.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
+	// }
 	// _, err = bind.WaitMined(context.Background(), client, erc1155tx)
 	// if err != nil {
 	// 	return nil, fmt.Errorf("WaitMined failed: %v", err)
@@ -309,11 +308,11 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 		logrus.Info("got all nonces")
 
 		return &EvmClient{
-			accounts:        reusedAccs,
-			networkId:       chainID,
-			erc20Address:    f.erc20Address,
-			erc721Address:   f.erc721Address,
-			erc1155Address:  f.erc1155Address,
+			accounts:  reusedAccs,
+			networkId: chainID,
+			// erc20Address:    f.erc20Address,
+			// erc721Address:   f.erc721Address,
+			// erc1155Address:  f.erc1155Address,
 			lastAccountUsed: 0,
 		}, nil
 	}
@@ -408,36 +407,36 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 				if err != nil {
 					logrus.Errorf("unable to send transaction: %v", err)
 				}
-				contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
-				if err != nil {
-					logrus.Errorf("unable to get abi: %v", err)
-				}
-				contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
-				auth, err := bind.NewKeyedTransactorWithChainID(seedingKey, chainID)
-				auth.GasLimit = 200000
-				if err != nil {
-					logrus.Errorf("unable to create keyed transactor: %v", err)
-				}
-				tokensToSend := big.NewInt(100000)
-				resTx, err := contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
-				if err != nil {
-					logrus.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
-				}
-				_, _ = bind.WaitMined(context.Background(), client, resTx)
-				contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
-				if err != nil {
-					logrus.Errorf("unable to get abi: %v", err)
-				}
-				contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
-				if err != nil {
-					logrus.Errorf("unable to create ERC1155 contract instance: %v", err)
-				}
-				tokenId := big.NewInt(1)
-				resTx, err = contractInstance.Transact(auth, "safeTransferFrom", seedingAddress, addrNew, tokenId, tokensToSend, []byte{})
-				if err != nil {
-					logrus.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
-				}
-				_, _ = bind.WaitMined(context.Background(), client, resTx)
+				// contractABI, err := abi.JSON(strings.NewReader(ERC20abi))
+				// if err != nil {
+				// 	logrus.Errorf("unable to get abi: %v", err)
+				// }
+				// contractInstance := bind.NewBoundContract(f.erc20Address, contractABI, client, client, client)
+				// auth, err := bind.NewKeyedTransactorWithChainID(seedingKey, chainID)
+				// auth.GasLimit = 200000
+				// if err != nil {
+				// 	logrus.Errorf("unable to create keyed transactor: %v", err)
+				// }
+				// tokensToSend := big.NewInt(100000)
+				// resTx, err := contractInstance.Transact(auth, "transfer", addrNew, tokensToSend)
+				// if err != nil {
+				// 	logrus.Errorf("unable to transfer tokens to a new client %s: %v", addrNew.String(), err)
+				// }
+				// _, _ = bind.WaitMined(context.Background(), client, resTx)
+				// contractABI, err = abi.JSON(strings.NewReader(ERC1155abi))
+				// if err != nil {
+				// 	logrus.Errorf("unable to get abi: %v", err)
+				// }
+				// contractInstance = bind.NewBoundContract(f.erc1155Address, contractABI, client, client, client)
+				// if err != nil {
+				// 	logrus.Errorf("unable to create ERC1155 contract instance: %v", err)
+				// }
+				// tokenId := big.NewInt(1)
+				// resTx, err = contractInstance.Transact(auth, "safeTransferFrom", seedingAddress, addrNew, tokenId, tokensToSend, []byte{})
+				// if err != nil {
+				// 	logrus.Errorf("unable to transfer ERC1155 tokens to a new client %s: %v", addrNew.String(), err)
+				// }
+				// _, _ = bind.WaitMined(context.Background(), client, resTx)
 				newAcc := account{privateKey: privateKey, address: addrNew}
 				f.m.Lock()
 				defer f.m.Unlock()
@@ -457,11 +456,11 @@ func (f *EvmClientFactory) NewClient(cfg Config) (Client, error) {
 	}
 
 	return &EvmClient{
-		accounts:        accounts,
-		networkId:       chainID,
-		erc20Address:    f.erc20Address,
-		erc721Address:   f.erc721Address,
-		erc1155Address:  f.erc1155Address,
+		accounts:  accounts,
+		networkId: chainID,
+		// erc20Address:    f.erc20Address,
+		// erc721Address:   f.erc721Address,
+		// erc1155Address:  f.erc1155Address,
 		lastAccountUsed: 0,
 	}, nil
 }
@@ -507,21 +506,22 @@ func (c *EvmClient) GenerateTx() ([]byte, error) {
 	value := big.NewInt(1)
 	var tx []byte
 
+	tx, err = c.prepareNormalTx(c.accounts[c.lastAccountUsed], addrNew, value)
 	// r := rand.Int() % 4
-	payload := randSeq(500)
-	r := 2
-	switch r {
-	case 0: // normal tokens
-		tx, err = c.prepareNormalTx(c.accounts[c.lastAccountUsed], addrNew, value)
-	case 1: // erc20
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, uint64(70000), addrNew, value)
-	case 2: // erc721
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, uint64(500000), addrNew, payload)
-	case 3: // erc1155
-		tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, uint64(70000), c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
-	default:
-		panic("Should never happen")
-	}
+	// payload := randSeq(500)
+	// r := 0
+	// switch r {
+	// case 0: // normal tokens
+	// 	tx, err = c.prepareNormalTx(c.accounts[c.lastAccountUsed], addrNew, value)
+	// case 1: // erc20
+	// 	tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "transfer", ERC20abi, c.erc20Address, uint64(70000), addrNew, value)
+	// case 2: // erc721
+	// 	tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "awardItem", ERC721abi, c.erc721Address, uint64(500000), addrNew, payload)
+	// case 3: // erc1155
+	// 	tx, err = c.prepareSmartContractTx(c.accounts[c.lastAccountUsed], "safeTransferFrom", ERC1155abi, c.erc1155Address, uint64(70000), c.accounts[c.lastAccountUsed].address, addrNew, big.NewInt(1), value, []byte{})
+	// default:
+	// 	panic("Should never happen")
+	// }
 
 	c.accounts[c.lastAccountUsed].nonce++
 
@@ -580,7 +580,7 @@ func (c *EvmClient) prepareSmartContractTx(acc account, functionName, abiStr str
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to get nonce: %v", err)
 	// }
-	gasPrice := big.NewInt(100)
+	gasPrice := big.NewInt(1000000)
 	// gasPrice, err := client.SuggestGasPrice(context.Background())
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to calculate gas price: %v", err)
